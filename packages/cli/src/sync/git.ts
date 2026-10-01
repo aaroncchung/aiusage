@@ -74,8 +74,8 @@ export class GitSyncBackend {
     } catch (error) {
       if (error instanceof GitHubAuthError || error instanceof GitIsolationError) throw error
       // Never retain child-process message, stack, stdout, stderr, cmd, or cause:
-      // only a sanitized one-line summary of stderr is surfaced.
-      const detail = gitFailureSummary(error, token)
+      // only a sanitized one-line summary is surfaced (fixed phrases for network commands).
+      const detail = gitFailureSummary(error, { network, token })
       throw new Error(`GitHub Git operation failed or was rejected${detail ? ` (git ${args[0]}: ${detail})` : ''}. Check repository access, network connectivity, and Git identity.`)
     }
   }

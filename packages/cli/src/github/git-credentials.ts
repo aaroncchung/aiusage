@@ -60,27 +60,47 @@ export function gitCredentialOptions(repo: string, token?: string) {
 
 const GITHUB_TOKEN = /\b(?:gh[opsuhr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)/g
 
+/** Fixed phrases for recognized network failures, checked in order. */
+const NETWORK_FAILURES: [RegExp, string][] = [
+  [/unable to access '(?![a-z][a-z0-9+.-]*:\/\/)/i, 'cannot read a Git config file'],
+  [/Could not resolve host/i, 'could not resolve host'],
+  [/Failed to connect|Couldn't connect|Connection (?:timed out|refused|reset)|Operation timed out/i, 'could not connect to GitHub'],
+  [/\bSSL|\bTLS\b|certificate|schannel/, 'TLS error'],
+  [/Authentication failed|could not read (?:Username|Password)|terminal prompts disabled/i, 'authentication failed'],
+  [/Repository not found|repository '[^']*' not found/i, 'repository not found'],
+  [/couldn't find remote ref|Remote branch \S+ not found/i, 'remote branch not found'],
+  [/\[(?:remote )?rejected\]|non-fast-forward|failed to push some refs/i, 'push rejected'],
+]
+
 /**
- * One line describing why a Git child process failed: the first `fatal:` (else
- * `error:`) line of stderr. Server-relayed text and anything about the credential
- * helper (whose configuration embeds the helper source) is reduced to a fixed
- * phrase; the token, GitHub token shapes and URL userinfo are redacted.
+ * One line describing why a Git child process failed, or undefined.
+ *
+ * Network stderr can carry server-controlled text (`remote:` lines, "invalid
+ * server response; got …", remote errors) that may echo credentials, so it is
+ * never copied: only the HTTP status or a fixed phrase for a recognized failure
+ * is returned. Local commands run without a token and get the first `fatal:`
+ * (else `error:`) line, after control and format characters are removed and
+ * before redaction, so that removal cannot reassemble a secret. Credential-helper
+ * lines (the helper configuration embeds its source) become a fixed phrase.
  */
-export function gitFailureSummary(error: unknown, token?: string): string | undefined {
+export function gitFailureSummary(error: unknown, options: { network: boolean; token?: string }): string | undefined {
   const failure = error as { code?: unknown; killed?: unknown; stderr?: unknown } | null
   if (failure?.code === 'ENOENT') return 'git was not found on PATH'
   if (failure?.killed) return 'git timed out'
   if (typeof failure?.stderr !== 'string') return undefined
-  const lines = failure.stderr.split(/\r?\n/)
+  const lines = failure.stderr.split(/\r?\n/).map(l => l.replace(/[\p{Cc}\p{Cf}]/gu, ''))
+  if (options.network) {
+    const status = lines.join('\n').match(/The requested URL returned error: (\d{3})\b/)
+    if (status) return `HTTP ${status[1]}`
+    return NETWORK_FAILURES.find(([pattern]) => lines.some(l => pattern.test(l)))?.[1]
+  }
   const line = lines.find(l => l.startsWith('fatal: ')) ?? lines.find(l => l.startsWith('error: '))
   if (!line) return undefined
   const level = line.slice(0, line.indexOf(':'))
   if (/^fatal: remote error/i.test(line)) return 'fatal: remote error'
   if (/credential|AIUSAGE_GIT_CREDENTIAL|process\.(argv|stdin|env)/i.test(line)) return `${level}: credential helper failed`
-  let summary = token ? line.split(token).join('[redacted]') : line
-  summary = summary
+  const summary = (options.token ? line.split(options.token).join('[redacted]') : line)
     .replace(GITHUB_TOKEN, '[redacted]')
     .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@']*@/gi, '$1')
-    .replace(/[\u0000-\u001f\u007f]/g, '')
   return summary.length > 200 ? `${summary.slice(0, 197)}...` : summary
 }
