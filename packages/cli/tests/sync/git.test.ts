@@ -131,6 +131,35 @@ describe('GitSyncBackend.flush', () => {
     expect(err.stack).not.toContain('secret-token-abc')
   })
 
+  it('surfaces the fatal line from git stderr for local commands', async () => {
+    const { GitSyncBackend } = await import('../../src/sync/git.js')
+    const backend = new GitSyncBackend({ repo: 'u/r', token: 't', cacheDir: '/tmp/s' })
+    gitRejects('Command failed: git status', "fatal: unable to access 'NUL': Invalid argument\n")
+    await expect(backend.flush()).rejects.toThrow(
+      "GitHub Git operation failed or was rejected (git status: fatal: unable to access 'NUL': Invalid argument). Check repository access, network connectivity, and Git identity.")
+  })
+
+  it('surfaces a sanitized fatal line for network commands without the token or server text', async () => {
+    const { GitSyncBackend } = await import('../../src/sync/git.js')
+    const backend = new GitSyncBackend({ repo: 'u/r', token: 'ghs_SecretToken123', cacheDir: '/tmp/s' })
+    const stderr = "remote: echoed ghs_SecretToken123\nfatal: unable to access 'https://x-access-token:ghs_SecretToken123@github.com/u/r.git/': The requested URL returned error: 403\n"
+    gitResolves('M data/x.ndjson'); gitResolves(); gitResolves()
+    gitRejects('push', stderr); gitResolves(); gitRejects('push', stderr); gitResolves(); gitRejects('push', stderr)
+    const error = await backend.flush().catch(e => e as Error)
+    expect(error.message).toContain("(git push: fatal: unable to access 'https://github.com/u/r.git/': The requested URL returned error: 403)")
+    expect(error.message).not.toContain('ghs_SecretToken123')
+    expect(error.message).not.toContain('remote:')
+  })
+
+  it('does not surface credential-helper configuration in errors', async () => {
+    const { GitSyncBackend } = await import('../../src/sync/git.js')
+    const backend = new GitSyncBackend({ repo: 'u/r', token: 't', cacheDir: '/tmp/s' })
+    gitRejects('status', "fatal: bad config value for 'credential.helper': !'node' -e 'if(process.argv[1]===\"get\")'\n")
+    const error = await backend.flush().catch(e => e as Error)
+    expect(error.message).toContain('(git status: fatal: credential helper failed)')
+    expect(error.message).not.toContain('process.argv')
+  })
+
   it('uses custom branch name in push operations', async () => {
     const { GitSyncBackend } = await import('../../src/sync/git.js')
     const backend = new GitSyncBackend({ repo: 'u/r', token: 't', cacheDir: '/tmp/s', branch: 'master' })
