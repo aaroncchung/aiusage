@@ -122,6 +122,18 @@ describe('gitFailureSummary', () => {
     for (const hidden of ['\u001b', '\u0000', '​', '⁠']) {
       const summary = gitFailureSummary({ stderr: `fatal: got gh${hidden}s_SyntheticSecret123\n` }, { network: false, token: 'ghs_SyntheticSecret123' })!
       expect(summary).toBe('fatal: got [redacted]')
+      expect(gitFailureSummary({ stderr: `fatal: got xgh${hidden}s_SyntheticSecret123\n` }, local)).toBe('fatal: got x[redacted]')
+    }
+  })
+  it('redacts GitHub tokens glued to preceding text without knowing the token', () => {
+    expect(gitFailureSummary({ stderr: "fatal: bad numeric config value 'xghs_SyntheticSecret123' for 'core.abbrev': invalid unit\n" }, local))
+      .toBe("fatal: bad numeric config value 'x[redacted]' for 'core.abbrev': invalid unit")
+    expect(gitFailureSummary({ stderr: 'fatal: 1github_pat_11AB_cd and _ghp_abc\n' }, local)).toBe('fatal: 1[redacted] and _[redacted]')
+  })
+  it('redacts URL userinfo containing quotes, spaces and @', () => {
+    for (const userinfo of ["user:sec'ret", 'user:sec ret', 'us@er:p@ss', "a:b'@c"]) {
+      const summary = gitFailureSummary({ stderr: `fatal: bad config value 'https://${userinfo}@github.com/o/r.git' for 'remote.origin.url'\n` }, local)!
+      expect(summary).toBe("fatal: bad config value 'https://github.com/o/r.git' for 'remote.origin.url'")
     }
   })
   it('never echoes credential-helper configuration or server-relayed errors', () => {

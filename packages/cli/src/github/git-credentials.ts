@@ -58,7 +58,8 @@ export function gitCredentialOptions(repo: string, token?: string) {
   return { args, env }
 }
 
-const GITHUB_TOKEN = /\b(?:gh[opsuhr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)/g
+// No leading word boundary: a token glued to preceding text (`xghs_…`) is still a token.
+const GITHUB_TOKEN = /(?:gh[opsuhr]_|github_pat_)[A-Za-z0-9_]+/g
 
 /** Fixed phrases for recognized network failures, checked in order. */
 const NETWORK_FAILURES: [RegExp, string][] = [
@@ -101,6 +102,8 @@ export function gitFailureSummary(error: unknown, options: { network: boolean; t
   if (/credential|AIUSAGE_GIT_CREDENTIAL|process\.(argv|stdin|env)/i.test(line)) return `${level}: credential helper failed`
   const summary = (options.token ? line.split(options.token).join('[redacted]') : line)
     .replace(GITHUB_TOKEN, '[redacted]')
-    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@']*@/gi, '$1')
+    // Userinfo may contain quotes and spaces when Git echoes a raw config value, so
+    // drop everything between the scheme and the last `@` before the next `/`.
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/]*@/gi, '$1')
   return summary.length > 200 ? `${summary.slice(0, 197)}...` : summary
 }
