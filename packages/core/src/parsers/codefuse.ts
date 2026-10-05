@@ -59,10 +59,13 @@ function usageFromNative(parsed: any): UsageParts | null {
 function usageFromCodexPayload(payload: any): UsageParts | null {
   const usage = payload?.last_token_usage ?? payload?.info?.last_token_usage
   if (!usage || typeof usage !== 'object') return null
+  // Codex reports input_tokens inclusive of cached_input_tokens. Store only the
+  // uncached part so cached tokens are not counted (and priced) twice.
+  const cachedTokens = num(usage.cached_input_tokens)
   return {
-    inputTokens: num(usage.input_tokens),
+    inputTokens: Math.max(0, num(usage.input_tokens) - cachedTokens),
     outputTokens: num(usage.output_tokens),
-    cacheReadTokens: num(usage.cached_input_tokens),
+    cacheReadTokens: cachedTokens,
     cacheWriteTokens: 0,
     thinkingTokens: num(usage.reasoning_output_tokens),
   }

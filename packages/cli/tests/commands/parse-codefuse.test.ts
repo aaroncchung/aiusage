@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import Database from 'better-sqlite3'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { initializeDatabase } from '../../src/db/index.js'
 
 vi.mock('node:os', async () => {
@@ -237,7 +237,7 @@ describe('runParse with CodeFuse data', () => {
     const embedded = cacheDb.prepare('SELECT model, input_tokens, output_tokens, cache_read_tokens, thinking_tokens FROM records WHERE session_id = ?').get('embedded-session') as any
     expect(embedded).toMatchObject({
       model: 'gpt-4o',
-      input_tokens: 10,
+      input_tokens: 8,
       output_tokens: 5,
       cache_read_tokens: 2,
       thinking_tokens: 1,
@@ -268,5 +268,64 @@ describe('runParse with CodeFuse data', () => {
     await runParse(cacheDb, 'codefuse')
     expect(cacheDb.prepare('SELECT COUNT(*) AS n FROM records WHERE tool = ?').get('codefuse')).toMatchObject({ n: 5 })
     expect(cacheDb.prepare('SELECT COUNT(*) AS n FROM tool_calls').get()).toMatchObject({ n: 4 })
+  })
+
+  it('corrects embedded Codex records imported before cached tokens were subtracted, in place', async () => {
+    const embeddedCodexDir = join(codeFuseRoot, 'engine', 'codex', 'sessions', '2026', '07', '06')
+    const ccDir = join(codeFuseRoot, 'engine', 'cc', 'projects', '-workspace')
+    mkdirSync(embeddedCodexDir, { recursive: true })
+    mkdirSync(ccDir, { recursive: true })
+    writeJsonl(join(embeddedCodexDir, 'rollout-embedded-session.jsonl'), [
+      {
+        timestamp: '2026-07-06T08:01:00.000Z',
+        type: 'response_item',
+        payload: { type: 'function_call', name: 'exec_command' },
+      },
+      {
+        timestamp: '2026-07-06T08:01:01.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          model: 'gpt-6-sol',
+          info: { last_token_usage: { input_tokens: 1000000, output_tokens: 5, cached_input_tokens: 900000 } },
+        },
+      },
+    ])
+    writeJsonl(join(ccDir, 'cc-session.jsonl'), [
+      {
+        type: 'assistant',
+        uuid: 'cc-uuid-1',
+        sessionId: 'cc-session',
+        timestamp: '2026-07-06T08:00:00.000Z',
+        message: { model: 'claude-opus-4-6', usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 40 } },
+      },
+    ])
+
+    await runParse(cacheDb, 'codefuse')
+    const select = cacheDb.prepare('SELECT id, input_tokens, cache_read_tokens, cost FROM records WHERE session_id = ?')
+    const fresh = select.get('embedded-session') as any
+    expect(fresh).toMatchObject({ input_tokens: 100000, cache_read_tokens: 900000 })
+    expect(fresh.cost).toBeGreaterThan(0)
+
+    // Recreate what the previous parser stored: cached tokens in both columns,
+    // and a watermark without a CodeFuse parser version.
+    cacheDb.prepare('UPDATE records SET input_tokens = 1000000, cost = cost * 5, synced_at = 1, updated_at = 1 WHERE id = ?').run(fresh.id)
+    const watermarkPath = join(testDir, '.aiusage', 'watermark.json')
+    const watermark = JSON.parse(readFileSync(watermarkPath, 'utf-8'))
+    expect(watermark.codefuseParserVersion).toBe(1)
+    delete watermark.codefuseParserVersion
+    writeFileSync(watermarkPath, JSON.stringify(watermark))
+
+    await runParse(cacheDb, 'codefuse')
+
+    expect(select.get('embedded-session')).toEqual(fresh)
+    expect(select.get('cc-session')).toMatchObject({ input_tokens: 100, cache_read_tokens: 40 })
+    expect(cacheDb.prepare('SELECT COUNT(*) AS n FROM records WHERE tool = ?').get('codefuse')).toMatchObject({ n: 2 })
+    expect(cacheDb.prepare('SELECT COUNT(*) AS n FROM tool_calls').get()).toMatchObject({ n: 1 })
+    // The corrected row is published again.
+    const state = cacheDb.prepare('SELECT synced_at, updated_at FROM records WHERE id = ?').get(fresh.id) as any
+    expect(state.synced_at).toBeNull()
+    expect(state.updated_at).toBeGreaterThan(1)
+    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).codefuseParserVersion).toBe(1)
   })
 })

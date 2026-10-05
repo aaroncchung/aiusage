@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **CodeFuse embedded Codex sessions counted and billed cached input tokens twice** — sessions CodeFuse runs through its embedded Codex engine log `input_tokens` inclusive of `cached_input_tokens`, and the parser stored both as-is, so cached tokens appeared in both the input and the cache-read column and were charged once at the input price and again at the cache-read price. The parser now stores `input_tokens - cached_input_tokens` as input for those sessions; CodeFuse's Claude Code and native formats were already correct. CodeFuse parsing is versioned in `watermark.json`: the upgrade re-imports every CodeFuse log once, and since record ids do not depend on the token counts, the corrected input tokens and cost replace the old rows in place and are published on the next sync. Records whose log file no longer exists cannot be re-imported and keep their old values.
+
 ---
 
 ## [1.5.19] - 2026-09-24

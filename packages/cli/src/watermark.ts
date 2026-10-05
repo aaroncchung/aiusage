@@ -10,6 +10,12 @@ const CURRENT_CODEBUDDY_PARSER_VERSION = 1
  * re-import corrects model, provider and cost in place.
  */
 const CURRENT_ANTIGRAVITY_PARSER_VERSION = 1
+/**
+ * v1: input tokens of embedded Codex sessions exclude cached tokens. Every
+ * CodeFuse log is re-imported once; records keep their ids, so the re-import
+ * corrects input tokens and cost in place.
+ */
+const CURRENT_CODEFUSE_PARSER_VERSION = 1
 
 export interface WatermarkEntry {
   offset: number
@@ -58,6 +64,7 @@ export interface WatermarkState {
   grokParserVersion?: number
   codebuddyParserVersion?: number
   antigravityParserVersion?: number
+  codefuseParserVersion?: number
   toolCallBackfillVersion?: number
   opencode?: OpenCodeCursor | null
   hermes?: HermesCursor | null
@@ -81,6 +88,7 @@ function defaultState(): WatermarkState {
     grokParserVersion: CURRENT_GROK_PARSER_VERSION,
     codebuddyParserVersion: CURRENT_CODEBUDDY_PARSER_VERSION,
     antigravityParserVersion: CURRENT_ANTIGRAVITY_PARSER_VERSION,
+    codefuseParserVersion: CURRENT_CODEFUSE_PARSER_VERSION,
   }
 }
 
@@ -141,6 +149,7 @@ export class WatermarkManager {
           grokParserVersion: parsed.grokParserVersion,
           codebuddyParserVersion: parsed.codebuddyParserVersion,
           antigravityParserVersion: parsed.antigravityParserVersion,
+          codefuseParserVersion: parsed.codefuseParserVersion,
           toolCallBackfillVersion: parsed.toolCallBackfillVersion,
           opencode: parsed.opencode ?? null,
           hermes: parsed.hermes ?? null,
@@ -172,6 +181,13 @@ export class WatermarkManager {
         // every conversation database so those records are corrected in place.
         state.files.antigravity = {}
         state.antigravityParserVersion = CURRENT_ANTIGRAVITY_PARSER_VERSION
+      }
+      if ((state.codefuseParserVersion ?? 0) < CURRENT_CODEFUSE_PARSER_VERSION) {
+        // v1: embedded Codex sessions stored input_tokens inclusive of the
+        // cached tokens also stored as cache-read; re-import every CodeFuse
+        // log so those records are corrected in place.
+        state.files.codefuse = {}
+        state.codefuseParserVersion = CURRENT_CODEFUSE_PARSER_VERSION
       }
       return state
     } catch {

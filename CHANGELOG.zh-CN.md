@@ -7,6 +7,9 @@
 
 ## [未发布]
 
+### 修复
+- **CodeFuse 内嵌 Codex 会话的缓存输入 token 被重复统计和计费** — CodeFuse 通过内嵌 Codex 引擎运行的会话，其日志中的 `input_tokens` 已包含 `cached_input_tokens`，而解析器将两者原样存储，因此缓存 token 同时出现在输入列和缓存读取列中，既按输入价格又按缓存读取价格各计费一次。解析器现在对这类会话将 `input_tokens - cached_input_tokens` 作为输入存储；CodeFuse 的 Claude Code 格式和原生格式原本就是正确的。CodeFuse 解析在 `watermark.json` 中带有版本号：升级后会重新导入每个 CodeFuse 日志一次；由于记录 ID 不依赖 token 数，修正后的输入 token 和费用会原地替换旧行，并在下次同步时发布。日志文件已不存在的记录无法重新导入，仍保留旧值。
+
 ---
 
 ## [1.5.19] - 2026-09-24

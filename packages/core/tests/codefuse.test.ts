@@ -207,6 +207,8 @@ describe('CodeFuseParser', () => {
     expect(result).not.toBeNull()
     expect(result!.record.tool).toBe('codefuse')
     expect(result!.record.model).toBe('gpt-5.4')
+    // input_tokens 10 includes the 2 cached tokens
+    expect(result!.record.inputTokens).toBe(8)
     expect(result!.record.cacheReadTokens).toBe(2)
     expect(result!.record.thinkingTokens).toBe(1)
     expect(result!.toolCalls).toHaveLength(1)
