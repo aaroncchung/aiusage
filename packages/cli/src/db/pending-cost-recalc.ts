@@ -20,27 +20,32 @@ import type { Config } from '../config.js'
  * repriced.
  */
 export function recalcPendingCosts(db: Database.Database, config?: Config | null): number {
-  const rows = db.prepare(`
+  // Cheap check so an ordinary open does not take the write lock.
+  if (!db.prepare('SELECT 1 FROM pending_cost_recalc LIMIT 1').get()) return 0
+
+  const exchangeRate = resolveExchangeRate(config ?? {})
+  const select = db.prepare(`
     SELECT r.id, r.model, r.input_tokens, r.output_tokens, r.cache_read_tokens,
            r.cache_write_tokens, r.thinking_tokens, r.cost_source
     FROM pending_cost_recalc p
     JOIN records r ON r.id = p.record_id
-  `).all() as Array<{
-    id: string
-    model: string
-    input_tokens: number
-    output_tokens: number
-    cache_read_tokens: number
-    cache_write_tokens: number
-    thinking_tokens: number
-    cost_source: string
-  }>
-  if (rows.length === 0) return 0
-
-  const exchangeRate = resolveExchangeRate(config ?? {})
+  `)
   const update = db.prepare('UPDATE records SET cost = ?, cost_source = ?, updated_at = ? WHERE id = ?')
 
+  // The queue is read under the write lock: another process sharing the
+  // database may drain it and re-parse a record in the meantime, and its cost
+  // must not then be overwritten from token counts read before that.
   return db.transaction(() => {
+    const rows = select.all() as Array<{
+      id: string
+      model: string
+      input_tokens: number
+      output_tokens: number
+      cache_read_tokens: number
+      cache_write_tokens: number
+      thinking_tokens: number
+      cost_source: string
+    }>
     let repriced = 0
     const now = Date.now()
     for (const row of rows) {
@@ -58,5 +63,5 @@ export function recalcPendingCosts(db: Database.Database, config?: Config | null
     }
     db.prepare('DELETE FROM pending_cost_recalc').run()
     return repriced
-  })()
+  }).immediate()
 }
