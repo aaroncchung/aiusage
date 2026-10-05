@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Codex cached input tokens counted and billed twice** — Codex logs `input_tokens` inclusive of `cached_input_tokens`, and the parser stored both as-is. Every other tool stores input as the uncached part only and pricing charges input and cache-read separately, so cached Codex tokens appeared in both the input and the cache-read column and were charged once at the input price and again at the cache-read price, overstating Codex input tokens, total tokens and cost. The parser now stores `input_tokens - cached_input_tokens` as input. Database migration v15 applies the same correction to the Codex records this device already parsed, recomputes their cost when it came from the price registry, and marks them changed so the corrected values are published on the next sync. Codex records pulled from another device are corrected when that device upgrades and syncs.
+
 ---
 
 ## [1.5.19] - 2026-09-24
