@@ -64,9 +64,11 @@ export class CodexParser implements Parser {
     const rawTs = parsed.event_msg?.timestamp ?? parsed.timestamp ?? context.now
     const ts = typeof rawTs === 'number' ? rawTs : new Date(rawTs).getTime()
 
-    const inputTokens = usage.input_tokens ?? 0
-    const outputTokens = usage.output_tokens ?? 0
+    // Codex reports input_tokens inclusive of cached_input_tokens. Store only the
+    // uncached part so cached tokens are not counted (and priced) twice.
     const cacheReadTokens = usage.cached_input_tokens ?? 0
+    const inputTokens = Math.max(0, (usage.input_tokens ?? 0) - cacheReadTokens)
+    const outputTokens = usage.output_tokens ?? 0
     const thinkingTokens = usage.reasoning_output_tokens ?? 0
     const cacheWriteTokens = 0 // Codex doesn't provide this
 

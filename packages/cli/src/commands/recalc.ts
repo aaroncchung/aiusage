@@ -16,7 +16,15 @@ export function recalcPricing(db: Database.Database): RecalcResult {
   let lastId = ''
   const exchangeRate = resolveExchangeRate(loadConfig() ?? {})
 
-  const updateStmt = db.prepare('UPDATE records SET model = ?, provider = ?, cost = ?, cost_source = ?, updated_at = ? WHERE id = ?')
+  // A pulled row's updated_at is the version of the remote record it mirrors:
+  // bumping it would make every later correction from its owner look stale to
+  // mergeSyncedRecordsIntoRecords. Only locally parsed rows are marked changed.
+  const updateStmt = db.prepare(`
+    UPDATE records
+    SET model = ?, provider = ?, cost = ?, cost_source = ?,
+        updated_at = CASE WHEN origin = 'local' THEN ? ELSE updated_at END
+    WHERE id = ?
+  `)
 
   while (true) {
     const records = db.prepare(
