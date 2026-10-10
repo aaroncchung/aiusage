@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
 
 vi.mock('node:child_process', () => ({ execFile: vi.fn() }))
 vi.mock('node:fs/promises', () => ({
@@ -11,8 +11,17 @@ vi.mock('node:fs/promises', () => ({
   rm: vi.fn(),
 }))
 
+// Keep the Windows empty global config out of the real ~/.aiusage.
+vi.mock('../../src/config.js', async importOriginal => {
+  const [{ mkdtempSync }, { tmpdir }, { join }] = await Promise.all([import('node:fs'), import('node:os'), import('node:path')])
+  return { ...await importOriginal<typeof import('../../src/config.js')>(), AIUSAGE_DIR: mkdtempSync(join(tmpdir(), 'aiusage-dir-')) }
+})
+
+import { rmSync } from 'node:fs'
 import { readFile, readdir, stat, unlink } from 'node:fs/promises'
+import { AIUSAGE_DIR } from '../../src/config.js'
 import { GitSyncBackend } from '../../src/sync/git.js'
+afterAll(() => rmSync(AIUSAGE_DIR, { recursive: true, force: true }))
 
 const mockReadFile = vi.mocked(readFile)
 const mockReaddir = vi.mocked(readdir)
