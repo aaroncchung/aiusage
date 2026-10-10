@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
 
 vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
@@ -12,8 +12,17 @@ vi.mock('node:fs/promises', () => ({
   stat: vi.fn().mockResolvedValue({}),
 }))
 
+// Keep the Windows empty global config out of the real ~/.aiusage.
+vi.mock('../../src/config.js', async importOriginal => {
+  const [{ mkdtempSync }, { tmpdir }, { join }] = await Promise.all([import('node:fs'), import('node:os'), import('node:path')])
+  return { ...await importOriginal<typeof import('../../src/config.js')>(), AIUSAGE_DIR: mkdtempSync(join(tmpdir(), 'aiusage-dir-')) }
+})
+
 import { execFile } from 'node:child_process'
+import { rmSync } from 'node:fs'
+import { AIUSAGE_DIR } from '../../src/config.js'
 const mockExecFile = vi.mocked(execFile)
+afterAll(() => rmSync(AIUSAGE_DIR, { recursive: true, force: true }))
 
 function gitResolves(stdout = '') {
   mockExecFile.mockImplementationOnce((...args: any[]) => {
@@ -129,6 +138,43 @@ describe('GitSyncBackend.flush', () => {
     expect(err.stdout).toBeUndefined()
     expect(err.cause).toBeUndefined()
     expect(err.stack).not.toContain('secret-token-abc')
+  })
+
+  it('surfaces the fatal line from git stderr for local commands', async () => {
+    const { GitSyncBackend } = await import('../../src/sync/git.js')
+    const backend = new GitSyncBackend({ repo: 'u/r', token: 't', cacheDir: '/tmp/s' })
+    gitRejects('Command failed: git status', "fatal: unable to access 'NUL': Invalid argument\n")
+    await expect(backend.flush()).rejects.toThrow(
+      "GitHub Git operation failed or was rejected (git status: fatal: unable to access 'NUL': Invalid argument). Check repository access, network connectivity, and Git identity.")
+  })
+
+  it('surfaces only a fixed phrase for network failures, never the token or server text', async () => {
+    const { GitSyncBackend } = await import('../../src/sync/git.js')
+    const backend = new GitSyncBackend({ repo: 'u/r', token: 'ghs_SecretToken123', cacheDir: '/tmp/s' })
+    const stderr = "remote: echoed ghs_SecretToken123\nfatal: unable to access 'https://x-access-token:ghs_SecretToken123@github.com/u/r.git/': The requested URL returned error: 403\n"
+    gitResolves('M data/x.ndjson'); gitResolves(); gitResolves()
+    gitRejects('push', stderr); gitResolves(); gitRejects('push', stderr); gitResolves(); gitRejects('push', stderr)
+    const error = await backend.flush().catch(e => e as Error)
+    expect(error.message).toBe('GitHub Git operation failed or was rejected (git push: HTTP 403). Check repository access, network connectivity, and Git identity.')
+  })
+
+  it('keeps unrecognized network failures generic', async () => {
+    const { readFile } = await import('node:fs/promises')
+    vi.mocked(readFile).mockResolvedValue('[remote "origin"]\nurl = https://github.com/u/r.git\n')
+    const { GitSyncBackend } = await import('../../src/sync/git.js')
+    const backend = new GitSyncBackend({ repo: 'u/r', token: 'ghs_SecretToken123', cacheDir: '/tmp/s' })
+    gitResolves(); gitResolves()
+    gitRejects('fetch', "fatal: invalid server response; got 'Basic eC1hY2Nlc3MtdG9rZW46Z2hzX1NlY3JldFRva2VuMTIz'\n")
+    await expect(backend.prepare()).rejects.toThrow(/^GitHub Git operation failed or was rejected\. Check repository access/)
+  })
+
+  it('does not surface credential-helper configuration in errors', async () => {
+    const { GitSyncBackend } = await import('../../src/sync/git.js')
+    const backend = new GitSyncBackend({ repo: 'u/r', token: 't', cacheDir: '/tmp/s' })
+    gitRejects('status', "fatal: bad config value for 'credential.helper': !'node' -e 'if(process.argv[1]===\"get\")'\n")
+    const error = await backend.flush().catch(e => e as Error)
+    expect(error.message).toContain('(git status: fatal: credential helper failed)')
+    expect(error.message).not.toContain('process.argv')
   })
 
   it('uses custom branch name in push operations', async () => {

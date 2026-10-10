@@ -5,13 +5,17 @@ import { applyPragmas } from './schema.js'
 import { runMigrations } from './migrations/index.js'
 import { loadConfig } from '../config.js'
 import { ensureCuratedPrices, ensureCuratedPricingAliases, loadPricingRuntime } from '../pricing-registry.js'
+import { recalcPendingCosts } from './pending-cost-recalc.js'
 
 export function initializeDatabase(db: Database.Database): void {
   applyPragmas(db)
   runMigrations(db)
   ensureCuratedPrices(db)
   ensureCuratedPricingAliases(db)
-  loadPricingRuntime(db, loadConfig())
+  const config = loadConfig()
+  loadPricingRuntime(db, config)
+  // Reprice records a migration re-counted, now that pricing is ready.
+  recalcPendingCosts(db, config)
 }
 
 function removeCorruptedDb(path: string): void {

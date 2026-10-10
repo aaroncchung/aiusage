@@ -428,7 +428,17 @@ export function mergeSyncedRecordsIntoRecords(db: Database.Database, currentDevi
     FROM synced_records sr
     WHERE sr.id = records.id
       AND records.origin = 'synced'
-      AND sr.updated_at > records.updated_at
+      AND (
+        sr.updated_at > records.updated_at
+        -- Nothing local rewrites a merged copy's token counts, so a difference
+        -- means the owner corrected the record. Take it even when an earlier
+        -- local recalc stamped the copy with a newer updated_at.
+        OR sr.input_tokens != records.input_tokens
+        OR sr.output_tokens != records.output_tokens
+        OR sr.cache_read_tokens != records.cache_read_tokens
+        OR sr.cache_write_tokens != records.cache_write_tokens
+        OR sr.thinking_tokens != records.thinking_tokens
+      )
       ${ownFilter}
   `).run(params)
 
