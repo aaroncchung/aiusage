@@ -22,16 +22,20 @@ interface Row {
 describe('runParse with a CodeBuddy IDE conversation that gets more turns', () => {
   let dataDir: string
   let db: Database.Database
-  let inheritedOverride: string | undefined
+  const savedEnv: Record<string, string | undefined> = {}
 
   beforeAll(() => {
-    // An override inherited from the environment would win over the fixture.
-    inheritedOverride = process.env.AIUSAGE_CODEBUDDY_IDE_PATH
-    delete process.env.AIUSAGE_CODEBUDDY_IDE_PATH
+    // Overrides inherited from the environment would win over the fixture or add other CodeBuddy sources.
+    for (const key of ['AIUSAGE_CODEBUDDY_IDE_PATH', 'AIUSAGE_CODEBUDDY_PATH', 'CODEBUDDY_HOME']) {
+      savedEnv[key] = process.env[key]
+      delete process.env[key]
+    }
   })
 
   afterAll(() => {
-    if (inheritedOverride !== undefined) process.env.AIUSAGE_CODEBUDDY_IDE_PATH = inheritedOverride
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value !== undefined) process.env[key] = value
+    }
   })
 
   beforeEach(() => {

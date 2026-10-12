@@ -3,7 +3,7 @@ import Database from 'better-sqlite3'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
-import { generateRecordId } from '@aiusage/core'
+import { kiroLogLineId } from '../../src/commands/importer-duplicates.js'
 import { initializeDatabase } from '../../src/db/index.js'
 import { runParse } from '../../src/commands/parse.js'
 
@@ -97,7 +97,7 @@ describe('runParse with a Kiro token log (tokens_generated.jsonl)', () => {
     expect(totals()).toEqual({ n: 4, input: 400, output: 40 })
   })
 
-  it('builds the id from the file path and byte offset alone', async () => {
+  it('builds the id from the file path, the byte offset and the line, not from a time', async () => {
     const first = request()
     write(first + request())
     await runParse(db, 'kiro')
@@ -106,7 +106,7 @@ describe('runParse with a Kiro token log (tokens_generated.jsonl)', () => {
 
     const lineLength = Buffer.byteLength(first, 'utf-8')
     expect(rows().map(r => ({ id: r.id, line_offset: r.line_offset }))).toEqual([0, 1, 2].map(i => ({
-      id: generateRecordId(DEVICE, logPath, i * lineLength),
+      id: kiroLogLineId(DEVICE, logPath, i * lineLength, first.trimEnd()),
       line_offset: i * lineLength,
     })))
   })
@@ -169,7 +169,9 @@ describe('runParse with a Kiro token log (tokens_generated.jsonl)', () => {
     write(other() + other() + other(), true)
     const result = await runParse(db, 'kiro')
     expect(result.parsedCount).toBe(3)
-    expect(rows().map(r => r.input_tokens)).toEqual([200, 200, 200])
+    // The requests of the first log are history and stay beside the new ones.
+    expect(rows().map(r => r.input_tokens)).toEqual([100, 200, 100, 200, 200])
+    expect(totals()).toEqual({ n: 5, input: 800, output: 50 })
 
     const again = await runParse(db, 'kiro')
     expect(again.parsedCount).toBe(0)
@@ -181,12 +183,16 @@ describe('runParse with a Kiro token log (tokens_generated.jsonl)', () => {
 
     write(request({ promptTokens: 300 }) + request({ promptTokens: 300 }), true)
     await runParse(db, 'kiro')
-    expect(rows().map(r => r.input_tokens)).toEqual([300, 300])
+    expect(rows().map(r => r.input_tokens)).toEqual([100, 300, 100, 300])
 
     write(request({ promptTokens: 500 }), true)
     await runParse(db, 'kiro')
-    // The first line was replaced in place; the second keeps the request stored for it.
-    expect(rows().map(r => r.input_tokens)).toEqual([500, 300])
+    expect(rows().map(r => r.input_tokens)).toEqual([100, 300, 500, 100, 300])
+
+    // Each of the three logs is read once.
+    const again = await runParse(db, 'kiro')
+    expect(again.parsedCount).toBe(0)
+    expect(totals().n).toBe(5)
   })
 
   it('does not read a log again whose time changed but whose content did not', async () => {
@@ -208,7 +214,6 @@ describe('runParse with a Kiro token log (tokens_generated.jsonl)', () => {
     write(other(7) + other(8) + other(9), true)
     const result = await runParse(db, 'kiro')
     expect(result.parsedCount).toBe(3)
-    const stored = rows()
-    expect(stored.filter(r => [7, 8, 9].includes(r.input_tokens))).toHaveLength(3)
+    expect(rows().map(r => r.input_tokens).sort((a, b) => a - b)).toEqual([7, 8, 9, 100, 100])
   })
 })

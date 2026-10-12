@@ -8,7 +8,7 @@ import type { StatsRecord, Tool } from '@aiusage/core'
 import { initializeDatabase } from '../../src/db/index.js'
 import { insertRecord, markRecordsSynced } from '../../src/db/records.js'
 import { runParse } from '../../src/commands/parse.js'
-import { collapseImporterDuplicates, repairImporterDuplicates } from '../../src/commands/importer-duplicates.js'
+import { collapseImporterDuplicates, kiroLogLineId, repairImporterDuplicates } from '../../src/commands/importer-duplicates.js'
 import { CURRENT_IMPORTER_DEDUP_VERSION, WatermarkManager } from '../../src/watermark.js'
 import { SyncOrchestrator } from '../../src/sync/index.js'
 import { FakeSyncBackend } from '../sync/helpers/fake-backend.js'
@@ -35,7 +35,9 @@ function record(tool: Tool, id: string, sourceFile: string, ts: number, override
 
 /** A Kiro log line as the old importer stored it: keyed on the file time of the parse that read it. */
 function oldKiro(path: string, lineOffset: number, mtime: number, overrides: Partial<StatsRecord> = {}): StatsRecord {
-  return record('kiro', generateRecordId(DEVICE, `${path}:${lineOffset}`, mtime), path, mtime, { lineOffset, ...overrides })
+  return record('kiro', generateRecordId(DEVICE, `${path}:${lineOffset}`, mtime), path, mtime, {
+    lineOffset, model: 'claude-sonnet-4', provider: 'kiro', ...overrides,
+  })
 }
 
 /** A Cursor transcript estimate as the old importer stored it. */
@@ -114,15 +116,22 @@ describe('importer duplicates', () => {
       expect(sum('input_tokens')).toBe(300)
     })
 
-    it('keeps one row for a Kiro line stored before and after the device had an id', () => {
+    it('keeps different Kiro requests that sit at the same offset of a log that was replaced', () => {
       const path = join(scratch, 'tokens_generated.jsonl')
-      const current = record('kiro', generateRecordId(DEVICE, path, 0), path, T0, { lineOffset: 0 })
-      insertRecord(db, record('kiro', generateRecordId('unknown', path, 0), path, T0 + 5, { lineOffset: 0 }))
-      insertRecord(db, current)
-      insertRecord(db, oldKiro(path, 0, T0 + 99_000))
+      // Two parses of the first log, then two parses of the log that replaced it.
+      insertRecord(db, oldKiro(path, 0, T0))
+      insertRecord(db, oldKiro(path, 0, T0 + 60_000))
+      const first = oldKiro(path, 0, T0 + 120_000)
+      insertRecord(db, first)
+      insertRecord(db, oldKiro(path, 0, T0 + 180_000, { inputTokens: 200 }))
+      const second = oldKiro(path, 0, T0 + 240_000, { inputTokens: 200 })
+      insertRecord(db, second)
+      const otherModel = oldKiro(path, 0, T0 + 300_000, { model: 'claude-opus-4' })
+      insertRecord(db, otherModel)
 
-      expect(collapseImporterDuplicates(db).kiro).toBe(2)
-      expect(ids()).toEqual([current.id])
+      expect(collapseImporterDuplicates(db).kiro).toBe(3)
+      expect(ids()).toEqual([first.id, second.id, otherModel.id].sort())
+      expect(sum('input_tokens')).toBe(400)
     })
 
     it('keeps the newest parse of a Kiro token log and deletes the earlier ones', () => {
@@ -139,15 +148,15 @@ describe('importer duplicates', () => {
       expect(count()).toBe(4)
     })
 
-    it('leaves Kiro rows with an offset-based id alone, whatever their time', () => {
+    it('leaves Kiro rows stored under the new ids alone, whatever their time', () => {
       const path = join(scratch, 'tokens_generated.jsonl')
       seedKiroGenerations(path)
       // Lines read after the upgrade: one record each, each with its own time.
       for (const [i, ts] of [T0 - 5_000, T0 + 500_000, T0 + 900_000].entries()) {
-        insertRecord(db, record('kiro', generateRecordId(DEVICE, path, 400 + i * 80), path, ts, { lineOffset: 400 + i * 80 }))
+        insertRecord(db, record('kiro', kiroLogLineId(DEVICE, path, 400 + i * 80, 'line'), path, ts, { lineOffset: 400 + i * 80 }))
       }
       // A line parsed before `init` and relabelled to the device afterwards.
-      insertRecord(db, record('kiro', generateRecordId('unknown', path, 800), path, T0 - 9_000, { lineOffset: 800 }))
+      insertRecord(db, record('kiro', kiroLogLineId('unknown', path, 800, 'line'), path, T0 - 9_000, { lineOffset: 800 }))
 
       expect(collapseImporterDuplicates(db).kiro).toBe(5)
       expect(count()).toBe(4 + 3 + 1)
@@ -172,18 +181,20 @@ describe('importer duplicates', () => {
       expect(count(`origin = 'local' AND source_file LIKE '%.jsonl'`)).toBe(4)
     })
 
-    it('keeps the newest estimate of a Cursor transcript', () => {
+    it('keeps the largest estimate of a Cursor transcript', () => {
       const path = join(scratch, 'p', 'agent-transcripts', 'c1', 'c1.jsonl')
       const other = join(scratch, 'p', 'agent-transcripts', 'c2', 'c2.jsonl')
       insertRecord(db, oldTranscript(path, T0, 100, 200))
       insertRecord(db, oldTranscript(path, T0 + 60_000, 100, 300))
       insertRecord(db, oldTranscript(path, T0 + 120_000, 150, 400))
+      // A later parse that could not read every line of the transcript.
+      insertRecord(db, oldTranscript(path, T0 + 180_000, 150, 0))
       insertRecord(db, oldTranscript(other, T0, 7, 9))
       // Records from state.vscdb are not estimates, and these are other conversations.
       insertRecord(db, record('cursor', 'vscdb-1', join(scratch, 'state.vscdb'), T0, { sessionId: 'c8' }))
       insertRecord(db, record('cursor', 'vscdb-2', join(scratch, 'state.vscdb'), T0 + 1, { sessionId: 'c9' }))
 
-      expect(collapseImporterDuplicates(db)).toEqual({ kiro: 0, cursor: 2, codebuddy: 0 })
+      expect(collapseImporterDuplicates(db)).toEqual({ kiro: 0, cursor: 3, codebuddy: 0 })
       expect(db.prepare(`SELECT input_tokens, output_tokens FROM records WHERE source_file = ?`).all(path))
         .toEqual([{ input_tokens: 150, output_tokens: 400 }])
       expect(count(`source_file LIKE '%c2.jsonl'`)).toBe(1)
@@ -307,7 +318,7 @@ describe('importer duplicates', () => {
 
       const result = await runParse(db, 'kiro')
       expect(result.errors).toEqual([])
-      expect(ids()).toEqual([0, 1, 2, 3].map(i => generateRecordId(DEVICE, log, i * length)).sort())
+      expect(ids()).toEqual([0, 1, 2, 3].map(i => kiroLogLineId(DEVICE, log, i * length, line.trimEnd())).sort())
       expect(sum('input_tokens')).toBe(400)
 
       // Nothing left to do on the next parse.
@@ -330,7 +341,7 @@ describe('importer duplicates', () => {
 
       await runParse(db, 'kiro')
       // Offset 0 was read again; the lines at the other offsets keep their newest old row.
-      expect(ids()).toEqual([generateRecordId(DEVICE, log, 0), ...rows.slice(6).map(r => r.id)].sort())
+      expect(ids()).toEqual([kiroLogLineId(DEVICE, log, 0, line.trimEnd()), ...rows.slice(6).map(r => r.id)].sort())
       expect(sum('input_tokens')).toBe(400)
     })
 
@@ -344,11 +355,13 @@ describe('importer duplicates', () => {
       writeFileSync(join(aiusageDir, 'config.json'), JSON.stringify({ sources: { kiro: root } }))
       // Read before `init` (ids built from 'unknown'), relabelled since; watermark.json was lost.
       for (const i of [0, 1]) {
-        insertRecord(db, record('kiro', generateRecordId('unknown', log, i * length), log, T0, { lineOffset: i * length }))
+        insertRecord(db, record('kiro', kiroLogLineId('unknown', log, i * length, line.trimEnd()), log, T0, {
+          lineOffset: i * length, model: 'claude-sonnet-4', provider: 'kiro',
+        }))
       }
 
       await runParse(db, 'kiro')
-      expect(ids()).toEqual([0, 1].map(i => generateRecordId(DEVICE, log, i * length)).sort())
+      expect(ids()).toEqual([0, 1].map(i => kiroLogLineId(DEVICE, log, i * length, line.trimEnd())).sort())
     })
 
     it('keeps a newer CodeBuddy IDE snapshot when only an older message can be read', async () => {

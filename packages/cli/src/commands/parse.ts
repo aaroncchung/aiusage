@@ -24,7 +24,7 @@ import { runParseZcode } from './parse-zcode.js'
 import { runParseTrae } from './parse-trae.js'
 import { runParseCodeBuddy } from './parse-codebuddy.js'
 import { runParseAntigravity } from './parse-antigravity.js'
-import { cursorTranscriptComposerId, deleteCursorTranscriptEstimates, hasCursorDatabaseRecord, prefixFingerprint, repairImporterDuplicates, replaceKiroLogLines, replaceSourceRecords, replaceSourceSnapshot } from './importer-duplicates.js'
+import { cursorTranscriptComposerId, deleteCursorTranscriptEstimates, hasCursorDatabaseRecord, kiroLogLineId, prefixFingerprint, repairImporterDuplicates, replaceKiroLogLines, replaceSourceRecords, replaceSourceSnapshot } from './importer-duplicates.js'
 import type { ProgressInfo } from '../progress.js'
 
 interface ParseResult {
@@ -705,8 +705,8 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
               const tokenArgs = { inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, thinkingTokens: 0 }
               const cost = calculateCost(model, tokenArgs, exchangeRate)
               const record: StatsRecord = {
-                // File and byte offset only: reading a line again replaces its record.
-                id: recordId(filePath, thisOffset),
+                // No time in the id: reading a line again replaces its record.
+                id: kiroLogLineId(deviceInstanceId, filePath, thisOffset, line),
                 ts: recordTs,
                 ingestedAt: Date.now(),
                 updatedAt: Date.now(),
@@ -734,7 +734,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
               if (newline === -1) nextOffset = thisOffset
             }
           }
-          // Each line also replaces what the old, time-based ids left of it.
+          // Each line also replaces the copies the old, time-based ids left of it.
           replaceKiroLogLines(db, filePath, records)
           parsedCount += records.length
           wm.setEntry(tool, filePath, {
@@ -828,8 +828,9 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
               platform: devicePlatform,
             }
             // Also removes the estimates stored under the old, time-based ids.
-            replaceSourceRecords(db, 'cursor', filePath, [record])
-            parsedCount++
+            // A transcript only grows: a smaller estimate than the stored one
+            // means part of the file could not be parsed, and is not stored.
+            if (replaceSourceSnapshot(db, 'cursor', filePath, record, 'larger')) parsedCount++
           }
           wm.setEntry(tool, filePath, {
             offset: stat.size,
@@ -1390,7 +1391,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
       // its record, including one stored under the old, time-based id, unless
       // what is stored is newer than what could be read.
       for (const record of result.records) {
-        if (replaceSourceSnapshot(db, 'codebuddy', record.sourceFile, record)) parsedCount++
+        if (replaceSourceSnapshot(db, 'codebuddy', record.sourceFile, record, 'later')) parsedCount++
       }
       errors.push(...result.errors)
       if (result.nextCursor > cbCursor) {

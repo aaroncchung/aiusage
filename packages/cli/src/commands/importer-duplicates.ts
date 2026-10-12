@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
 import { generateRecordId, type StatsRecord, type Tool } from '@aiusage/core'
-import { insertRecord, LOCAL_RECORDS_WHERE, UNKNOWN_DEVICE_INSTANCE_ID } from '../db/records.js'
+import { insertRecord, LOCAL_RECORDS_WHERE } from '../db/records.js'
 import { CURRENT_IMPORTER_DEDUP_VERSION, type WatermarkManager } from '../watermark.js'
 
 /**
@@ -15,8 +15,8 @@ import { CURRENT_IMPORTER_DEDUP_VERSION, type WatermarkManager } from '../waterm
  *  - CodeBuddy IDE conversations: one conversation-cumulative snapshot, keyed
  *    on the time of the latest message.
  *
- * Their ids are now stable (file and byte offset for Kiro, the file or the
- * conversation directory for the other two). This module removes the rows the
+ * Their ids are now stable (file, byte offset and line for Kiro, the file or
+ * the conversation directory for the other two). This module removes the rows the
  * old ids left behind, once for the whole database and whenever a source is
  * imported again.
  */
@@ -85,74 +85,90 @@ export function replaceSourceRecords(db: Database.Database, tool: Tool, sourceFi
 }
 
 /**
- * Store the one record that describes a whole source as of `record.ts`
- * (a CodeBuddy IDE conversation's cumulative snapshot), replacing the
- * source's other rows. Nothing is stored or deleted when a row of the source
- * is newer than the record: a conversation whose latest message cannot be
- * read at the moment yields an earlier snapshot, which must not replace the
- * later one. Returns whether the record was stored.
+ * Store the one record that describes a whole source — a CodeBuddy IDE
+ * conversation's cumulative snapshot, a Cursor transcript's estimate —
+ * replacing the source's other rows. Nothing is stored or deleted when a row
+ * of the source holds more than the record does, which happens when part of
+ * the source cannot be read at the moment:
+ *
+ *  - `'later'`: a stored row is newer (`ts`). A conversation whose latest
+ *    message is unreadable yields an earlier snapshot.
+ *  - `'larger'`: a stored row counts more tokens. A transcript only grows, so
+ *    a smaller estimate means lines of it could not be parsed.
+ *
+ * Returns whether the record was stored.
  */
-export function replaceSourceSnapshot(db: Database.Database, tool: Tool, sourceFile: string, record: StatsRecord): boolean {
+export function replaceSourceSnapshot(
+  db: Database.Database,
+  tool: Tool,
+  sourceFile: string,
+  record: StatsRecord,
+  keepStored: 'later' | 'larger',
+): boolean {
   return db.transaction(() => {
-    const newer = db.prepare(
-      `SELECT 1 FROM records WHERE tool = ? AND source_file = ? AND ${LOCAL_RECORDS_WHERE} AND ts > ? LIMIT 1`,
-    ).get(tool, sourceFile, record.ts)
-    if (newer) return false
+    const better = keepStored === 'later'
+      ? db.prepare(
+          `SELECT 1 FROM records WHERE tool = ? AND source_file = ? AND ${LOCAL_RECORDS_WHERE} AND ts > ? LIMIT 1`,
+        ).get(tool, sourceFile, record.ts)
+      : db.prepare(
+          `SELECT 1 FROM records WHERE tool = ? AND source_file = ? AND ${LOCAL_RECORDS_WHERE} AND input_tokens + output_tokens > ? LIMIT 1`,
+        ).get(tool, sourceFile, record.inputTokens + record.outputTokens)
+    if (better) return false
     replaceSourceRecords(db, tool, sourceFile, [record])
     return true
   })()
 }
 
-interface KiroLogRow {
-  id: string
-  device_instance_id: string
-  source_file: string
-  line_offset: number
-  ts: number
-}
-
 /**
- * How much a Kiro log row's id is worth keeping: 2 for the id built from its
- * file and byte offset, 1 for that id built before `init` gave the device an
- * id (the row was relabelled afterwards, its id was not), 0 for an old,
- * time-based id.
+ * Id of one line of a Kiro token log: the file, the byte offset and the line
+ * itself. The offset makes a line read again replace its own record; the
+ * line's content keeps a different request apart that sits at the same
+ * offset after the log was replaced by a new one.
  */
-function offsetIdRank(row: KiroLogRow): number {
-  if (row.id === generateRecordId(row.device_instance_id, row.source_file, row.line_offset)) return 2
-  if (row.id === generateRecordId(UNKNOWN_DEVICE_INSTANCE_ID, row.source_file, row.line_offset)) return 1
-  return 0
+export function kiroLogLineId(deviceInstanceId: string, filePath: string, lineOffset: number, line: string): string {
+  const lineHash = createHash('sha256').update(line).digest('hex').slice(0, 16)
+  return generateRecordId(deviceInstanceId, `${filePath}:${lineHash}`, lineOffset)
 }
 
 /**
- * Store the lines just read from a Kiro token log. Each record replaces every
- * other local row of the same file and byte offset in the same transaction:
- * the copies the old, time-based ids left of that line, and the row a line
- * got before `init` gave the device an id. Rows at other offsets are not
- * touched, so a line that could not be read again keeps what was stored for
- * it.
+ * Store the lines just read from a Kiro token log. Each record replaces the
+ * other local rows that stand for the same request — same file, byte offset,
+ * model and token counts — in the same transaction: the copies the old,
+ * time-based ids left of that line, and the row a line got before `init`
+ * gave the device an id. Nothing else is touched, so a line that could not be
+ * read again keeps what was stored for it, and so does a request of an
+ * earlier log that happened to sit at the same offset.
  */
 export function replaceKiroLogLines(db: Database.Database, sourceFile: string, records: StatsRecord[]): void {
   const others = db.prepare(`
     SELECT id FROM records
-    WHERE tool = 'kiro' AND ${LOCAL_RECORDS_WHERE} AND source_file = ? AND line_offset = ? AND id != ?
+    WHERE tool = 'kiro' AND ${LOCAL_RECORDS_WHERE} AND source_file = ? AND line_offset = ?
+      AND model = ? AND input_tokens = ? AND output_tokens = ? AND id != ?
   `)
   db.transaction(() => {
     for (const record of records) {
-      const rows = others.all(sourceFile, record.lineOffset, record.id) as Array<{ id: string }>
+      const rows = others.all(
+        sourceFile, record.lineOffset, record.model, record.inputTokens, record.outputTokens, record.id,
+      ) as Array<{ id: string }>
       deleteLocalRecords(db, rows.map(row => row.id))
       insertRecord(db, record)
     }
   })()
 }
 
-/** True when `composerId` has a local record imported from Cursor's `state.vscdb`, which holds real token counts. */
+/** Session ids of the local records imported from Cursor's `state.vscdb`, which holds real token counts. */
+function cursorDatabaseComposers(db: Database.Database, composerId?: string): Set<string> {
+  const rows = (composerId === undefined
+    ? db.prepare(`SELECT session_id, source_file FROM records WHERE tool = 'cursor' AND ${LOCAL_RECORDS_WHERE}`).all()
+    : db.prepare(`SELECT session_id, source_file FROM records WHERE tool = 'cursor' AND ${LOCAL_RECORDS_WHERE} AND session_id = ?`).all(composerId)
+  ) as Array<{ session_id: string; source_file: string }>
+  // Everything the Cursor importers store that is not a transcript estimate comes from the database.
+  return new Set(rows.filter(row => !isCursorTranscript(row.source_file)).map(row => row.session_id))
+}
+
+/** True when `composerId` has a local record imported from Cursor's `state.vscdb`. */
 export function hasCursorDatabaseRecord(db: Database.Database, composerId: string): boolean {
-  return db.prepare(`
-    SELECT 1 FROM records
-    WHERE tool = 'cursor' AND ${LOCAL_RECORDS_WHERE} AND session_id = ?
-      AND source_file NOT LIKE '%agent-transcripts%'
-    LIMIT 1
-  `).get(composerId) !== undefined
+  return cursorDatabaseComposers(db, composerId).has(composerId)
 }
 
 /**
@@ -180,39 +196,48 @@ export interface ImporterDuplicateCounts {
   codebuddy: number
 }
 
-interface SnapshotRow {
+interface DuplicateRow {
   id: string
   source_file: string
+  line_offset: number
+  model: string
+  input_tokens: number
+  output_tokens: number
   ts: number
   updated_at: number
 }
 
-/** All but the newest row of each source: the newest holds the latest state of the whole source. */
-function supersededSnapshots(rows: SnapshotRow[]): string[] {
-  const newest = new Map<string, SnapshotRow>()
+const DUPLICATE_COLUMNS = 'id, source_file, line_offset, model, input_tokens, output_tokens, ts, updated_at'
+
+/**
+ * The ids of all rows but one per group. `key` names the group a row belongs
+ * to and `prefer(a, b)` is positive when `a` is the better row to keep; ties
+ * go to the greater id so the outcome does not depend on row order.
+ */
+function allButBest(rows: DuplicateRow[], key: (row: DuplicateRow) => string, prefer: (a: DuplicateRow, b: DuplicateRow) => number): string[] {
+  const best = new Map<string, DuplicateRow>()
   for (const row of rows) {
-    const best = newest.get(row.source_file)
-    if (!best || row.ts > best.ts
-      || (row.ts === best.ts && (row.updated_at > best.updated_at || (row.updated_at === best.updated_at && row.id > best.id)))) {
-      newest.set(row.source_file, row)
-    }
+    const current = best.get(key(row))
+    if (!current || prefer(row, current) > 0 || (prefer(row, current) === 0 && row.id > current.id)) best.set(key(row), row)
   }
-  return rows.filter(row => newest.get(row.source_file) !== row).map(row => row.id)
+  return rows.filter(row => best.get(key(row)) !== row).map(row => row.id)
 }
 
 /**
- * Reduce the rows the old ids left behind to one copy of each source, from
- * the database alone, so it also works for a source that no longer exists on
- * disk:
+ * Reduce the rows the old ids left behind to one copy each, from the database
+ * alone, so it also works for a source that no longer exists on disk:
  *
  *  - Kiro token logs: every parse stored the lines of the file again, each
- *    under its byte offset and that parse's modification time. One row is
- *    kept per file and offset: the one with an offset-based id if there is
- *    one, otherwise the newest. Lines are matched one by one because a parse
- *    wrote its rows one at a time and may not have stored all of them.
- *  - Cursor transcripts and CodeBuddy IDE conversations: each row describes
- *    the whole source, so the newest one is kept. A transcript estimate goes
- *    altogether when its conversation is counted from `state.vscdb`.
+ *    under its byte offset and that parse's modification time. Rows of one
+ *    file that agree in byte offset, model and token counts are copies of one
+ *    request, and the most recently written one is kept. Lines are matched
+ *    one by one because a parse wrote its rows one at a time and may not have
+ *    stored all of them; rows that differ are different requests and stay.
+ *  - Cursor transcripts: each row estimates the whole file as far as it could
+ *    be parsed, so the largest estimate is kept. None is kept when the
+ *    conversation is counted from `state.vscdb`.
+ *  - CodeBuddy IDE conversations: each row is a cumulative snapshot, so the
+ *    latest one is kept.
  *
  * Only locally parsed rows are considered. Running it again finds nothing
  * more to delete. Returns the rows deleted per tool.
@@ -220,44 +245,39 @@ function supersededSnapshots(rows: SnapshotRow[]): string[] {
 export function collapseImporterDuplicates(db: Database.Database): ImporterDuplicateCounts {
   return db.transaction(() => {
     const kiroRows = (db.prepare(`
-      SELECT id, device_instance_id, source_file, line_offset, ts FROM records
+      SELECT ${DUPLICATE_COLUMNS} FROM records
       WHERE tool = 'kiro' AND ${LOCAL_RECORDS_WHERE} AND source_file LIKE '%.jsonl'
-    `).all() as KiroLogRow[]).filter(row => isKiroTokenLog(row.source_file))
-    const kept = new Map<string, { row: KiroLogRow; rank: number }>()
-    for (const row of kiroRows) {
-      const key = `${row.source_file}\0${row.line_offset}`
-      const rank = offsetIdRank(row)
-      const best = kept.get(key)
-      if (!best || rank > best.rank
-        || (rank === best.rank && (row.ts > best.row.ts || (row.ts === best.row.ts && row.id > best.row.id)))) {
-        kept.set(key, { row, rank })
-      }
-    }
-    const kiro = deleteLocalRecords(db, kiroRows
-      .filter(row => kept.get(`${row.source_file}\0${row.line_offset}`)!.row !== row)
-      .map(row => row.id))
+    `).all() as DuplicateRow[]).filter(row => isKiroTokenLog(row.source_file))
+    const kiro = deleteLocalRecords(db, allButBest(
+      kiroRows,
+      row => [row.source_file, row.line_offset, row.model, row.input_tokens, row.output_tokens].join('\0'),
+      (a, b) => a.updated_at - b.updated_at || a.ts - b.ts,
+    ))
 
     const transcripts = (db.prepare(`
-      SELECT id, source_file, ts, updated_at FROM records
+      SELECT ${DUPLICATE_COLUMNS} FROM records
       WHERE tool = 'cursor' AND ${LOCAL_RECORDS_WHERE} AND source_file LIKE '%agent-transcripts%'
-    `).all() as SnapshotRow[]).filter(row => isCursorTranscript(row.source_file))
+    `).all() as DuplicateRow[]).filter(row => isCursorTranscript(row.source_file))
     // An estimate is also superseded when its conversation has a record from
     // state.vscdb: the importer drops it when it reads the transcript, and
     // this covers a transcript that is gone.
-    const counted = db.prepare(`
-      SELECT DISTINCT session_id FROM records
-      WHERE tool = 'cursor' AND ${LOCAL_RECORDS_WHERE} AND source_file NOT LIKE '%agent-transcripts%'
-    `).all() as Array<{ session_id: string }>
-    const cursor = deleteLocalRecords(db, supersededSnapshots(transcripts))
-      + deleteCursorTranscriptEstimates(db, counted.map(row => row.session_id))
+    const cursor = deleteLocalRecords(db, allButBest(
+      transcripts,
+      row => row.source_file,
+      (a, b) => (a.input_tokens + a.output_tokens) - (b.input_tokens + b.output_tokens) || a.ts - b.ts || a.updated_at - b.updated_at,
+    )) + deleteCursorTranscriptEstimates(db, cursorDatabaseComposers(db))
 
     // CodeBuddy IDE rows are keyed on a conversation directory and offset 0;
     // the CodeBuddy CLI's rows come from `*.jsonl` files, one per line.
     const conversations = db.prepare(`
-      SELECT id, source_file, ts, updated_at FROM records
+      SELECT ${DUPLICATE_COLUMNS} FROM records
       WHERE tool = 'codebuddy' AND ${LOCAL_RECORDS_WHERE} AND line_offset = 0 AND source_file NOT LIKE '%.jsonl'
-    `).all() as SnapshotRow[]
-    const codebuddy = deleteLocalRecords(db, supersededSnapshots(conversations))
+    `).all() as DuplicateRow[]
+    const codebuddy = deleteLocalRecords(db, allButBest(
+      conversations,
+      row => row.source_file,
+      (a, b) => a.ts - b.ts || a.updated_at - b.updated_at,
+    ))
 
     return { kiro, cursor, codebuddy }
   })()

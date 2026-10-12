@@ -147,6 +147,35 @@ describe('runParse with Cursor agent transcripts', () => {
     expect(rows().map(r => [r.source_file, r.input_tokens, r.output_tokens])).toEqual([[transcriptPath, 100, 300]])
   })
 
+  it('keeps the stored estimate when part of the transcript can no longer be parsed', async () => {
+    say('user', 100)
+    say('assistant', 300)
+    await parse()
+    expect(rows().map(r => [r.input_tokens, r.output_tokens])).toEqual([[100, 300]])
+
+    // The assistant line is damaged; the file is longer than before.
+    const user = JSON.stringify({ role: 'user', message: { content: [{ type: 'text', text: 'a'.repeat(300) }] } })
+    writeFileSync(transcriptPath, user + '\n' + '{"role":"assistant","message":{"content":[{"type":"text","text":"' + 'a'.repeat(1200) + '\n')
+    clock += 60
+    utimesSync(transcriptPath, clock, clock)
+    const result = await parse()
+    expect(result.parsedCount).toBe(0)
+    expect(rows().map(r => [r.input_tokens, r.output_tokens])).toEqual([[100, 300]])
+  })
+
+  it('recognises state.vscdb records whatever the folder of the database is called', async () => {
+    cursorDbPath = join(scratch, 'agent-transcripts-backup', 'state.vscdb')
+    mkdirSync(join(scratch, 'agent-transcripts-backup'), { recursive: true })
+    writeComposer({ input: 5000, output: 200 })
+    await parse()
+    say('user', 100)
+    say('assistant', 200)
+    await parse()
+    say('assistant', 100)
+    await parse()
+    expect(rows().map(r => [r.source_file, r.input_tokens, r.output_tokens])).toEqual([[cursorDbPath, 5000, 200]])
+  })
+
   it('keeps the estimate of another conversation', async () => {
     writeComposer({ input: 5000, output: 200 })
     const other = '99999999-8888-7777-6666-555555555555'
