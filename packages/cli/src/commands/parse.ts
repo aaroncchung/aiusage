@@ -24,6 +24,7 @@ import { runParseZcode } from './parse-zcode.js'
 import { runParseTrae } from './parse-trae.js'
 import { runParseCodeBuddy } from './parse-codebuddy.js'
 import { runParseAntigravity } from './parse-antigravity.js'
+import { cursorTranscriptComposerId, deleteCursorTranscriptEstimates, deleteLegacyKiroLogRecords, hasCursorDatabaseRecord, repairImporterDuplicates, replaceSourceRecords } from './importer-duplicates.js'
 import type { ProgressInfo } from '../progress.js'
 
 interface ParseResult {
@@ -524,6 +525,9 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
 
   const watermarkPath = join(AIUSAGE_DIR, 'watermark.json')
   const wm = new WatermarkManager(watermarkPath)
+  // Once per database: remove the rows the Kiro, Cursor transcript and
+  // CodeBuddy IDE importers used to add on every change of a source.
+  repairImporterDuplicates(db, wm)
 
   const toolPaths = discoverLogFiles()
   const aggregator = new Aggregator()
@@ -668,33 +672,40 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
         }
 
         if (tool === 'kiro' && filePath.endsWith('.jsonl')) {
-          const content = readFileSync(filePath, 'utf-8')
-          const lines = content.split('\n')
-          let byteOffset = 0
-          for (const line of lines) {
-            if (!line.trim()) {
-              byteOffset += Buffer.byteLength(line, 'utf-8') + 1
-              continue
-            }
+          const buffer = readFileSync(filePath)
+          // The log is append-only, so the watermark sits where a line ended.
+          // Anywhere else means the file was replaced: read it from the start.
+          const startOffset = offset > 0 && (buffer[offset - 1] === 0x0a || buffer[offset] === 0x0a) ? offset : 0
+          const records: StatsRecord[] = []
+          let nextOffset = buffer.length
+          // Lines before the watermark are already stored.
+          for (let lineOffset = startOffset; lineOffset < buffer.length;) {
+            const newline = buffer.indexOf(0x0a, lineOffset)
+            const lineEnd = newline === -1 ? buffer.length : newline
+            const line = buffer.toString('utf-8', lineOffset, lineEnd)
+            const thisOffset = lineOffset
+            lineOffset = lineEnd + 1
+            if (!line.trim()) continue
             try {
               const data = JSON.parse(line)
               const inputTokens = toNumber(data.promptTokens ?? data.inputTokens ?? data.tokensIn)
               const outputTokens = toNumber(data.generatedTokens ?? data.outputTokens ?? data.tokensOut)
-              if (inputTokens + outputTokens === 0) {
-                byteOffset += Buffer.byteLength(line, 'utf-8') + 1
-                continue
-              }
+              if (inputTokens + outputTokens === 0) continue
               const model = normalizeKiroModel(data.model)
               const provider = typeof data.provider === 'string' && data.provider.trim() ? data.provider.trim().toLowerCase() : inferProvider(model)
-              const recordTs = stat.mtimeMs
+              // The time of the request when the line records one; otherwise the
+              // file time, which is close to it now that a line is read only once.
+              const lineTs = parseTimestamp(data.timestamp ?? data.ts ?? data.time ?? data.createdAt, 0)
+              const recordTs = lineTs > 0 ? lineTs : stat.mtimeMs
               const tokenArgs = { inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, thinkingTokens: 0 }
               const cost = calculateCost(model, tokenArgs, exchangeRate)
               const record: StatsRecord = {
-                id: recordId(`${filePath}:${byteOffset}`, recordTs),
+                // File and byte offset only: reading a line again replaces its record.
+                id: recordId(filePath, thisOffset),
                 ts: recordTs,
                 ingestedAt: Date.now(),
                 updatedAt: Date.now(),
-                lineOffset: byteOffset,
+                lineOffset: thisOffset,
                 tool: 'kiro',
                 model,
                 provider,
@@ -711,13 +722,22 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
                 deviceInstanceId,
                 platform: devicePlatform,
               }
-              insertRecord(db, record)
-              parsedCount++
-            } catch {}
-            byteOffset += Buffer.byteLength(line, 'utf-8') + 1
+              records.push(record)
+            } catch {
+              // A last line without a newline that does not parse is still
+              // being written: leave it for the next parse.
+              if (newline === -1) nextOffset = thisOffset
+            }
           }
+          db.transaction(() => {
+            // Read from the first line, the log replaces whatever the old,
+            // time-based ids left of it.
+            if (startOffset === 0) deleteLegacyKiroLogRecords(db, filePath)
+            for (const record of records) insertRecord(db, record)
+          })()
+          parsedCount += records.length
           wm.setEntry(tool, filePath, {
-            offset: stat.size,
+            offset: nextOffset,
             size: stat.size,
             mtime: stat.mtimeMs,
           })
@@ -764,20 +784,27 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
 
         // Cursor agent-transcript JSONL (fallback for PRIVACY_MODE_NO_STORAGE)
         if (tool === 'cursor' && filePath.endsWith('.jsonl') && filePath.includes('agent-transcripts')) {
-          const est = runParseCursorTranscript({
+          // The transcript is an estimate for conversations state.vscdb has no
+          // token counts for. One that is counted from there is not estimated
+          // as well, and an estimate stored for it earlier is dropped.
+          const countedFromDatabase = hasCursorDatabaseRecord(db, cursorTranscriptComposerId(filePath))
+          const est = countedFromDatabase ? { inputTextChars: 0, outputTextChars: 0 } : runParseCursorTranscript({
             jsonlPath: filePath,
             device,
             deviceInstanceId,
             platform: devicePlatform,
             now: Date.now(),
           })
-          if (est.inputTextChars + est.outputTextChars > 0) {
+          if (countedFromDatabase) {
+            replaceSourceRecords(db, 'cursor', filePath, [])
+          } else if (est.inputTextChars + est.outputTextChars > 0) {
             const sessionId = filePath.split('/').slice(-2, -1)[0] || 'unknown'
             const recordTs = stat.mtimeMs
             const tokenArgs = { inputTokens: est.inputTextChars, outputTokens: est.outputTextChars, cacheReadTokens: 0, cacheWriteTokens: 0, thinkingTokens: 0 }
             const cost = calculateCost('cursor-composer', tokenArgs, exchangeRate)
             const record: StatsRecord = {
-              id: recordId(filePath, recordTs),
+              // The file alone: one record per transcript, replaced when it grows.
+              id: recordId(filePath, 0),
               ts: recordTs,
               ingestedAt: Date.now(),
               updatedAt: Date.now(),
@@ -798,7 +825,8 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
               deviceInstanceId,
               platform: devicePlatform,
             }
-            insertRecord(db, record)
+            // Also removes the estimates stored under the old, time-based ids.
+            replaceSourceRecords(db, 'cursor', filePath, [record])
             parsedCount++
           }
           wm.setEntry(tool, filePath, {
@@ -1108,6 +1136,9 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
 
         for (const record of result.records) insertRecord(db, record)
         for (const tc of result.toolCalls) insertToolCall(db, tc)
+        // Transcripts are read before this database: an estimate stored for a
+        // conversation that now has real token counts is superseded.
+        deleteCursorTranscriptEstimates(db, result.records.map((record) => record.sessionId))
         if (result.nextCursor) {
           wm.setCursorCursor(result.nextCursor)
           wm.save()
@@ -1353,7 +1384,9 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
         cursor: cbCursor,
         exchangeRate,
       })
-      for (const record of result.records) insertRecord(db, record)
+      // One record per conversation: a conversation imported again replaces
+      // its record, including one stored under the old, time-based id.
+      for (const record of result.records) replaceSourceRecords(db, 'codebuddy', record.sourceFile, [record])
       parsedCount += result.records.length
       errors.push(...result.errors)
       if (result.nextCursor > cbCursor) {
