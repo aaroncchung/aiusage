@@ -1139,13 +1139,13 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           recordId,
           platform: devicePlatform,
           now: Date.now(),
-          cursor: wm.getOpenCodeCursor(),
+          cursor: wm.getKiloCursor(),
           exchangeRate,
         })
 
         for (const record of result.records) insertRecord(db, record)
         if (result.nextCursor) {
-          wm.setOpenCodeCursor(result.nextCursor)
+          wm.setKiloCursor(result.nextCursor)
           wm.save()
         }
         parsedCount += result.records.length

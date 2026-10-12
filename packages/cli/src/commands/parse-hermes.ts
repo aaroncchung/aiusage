@@ -54,7 +54,11 @@ export function runParseHermes(
   const records: StatsRecord[] = []
   const toolCalls: ToolCallRecord[] = []
   const errors: string[] = []
-  let lastCursor: HermesCursor | null = null
+  // Past the cursor, plus every session that is open now or was open when
+  // it was last read. A session's totals grow until it ends, and it can end
+  // at a time the cursor has already passed (another session ended later),
+  // so the cursor alone would leave it at whatever it held when first seen.
+  const reread = JSON.stringify(cursor?.openSessionIds ?? [])
 
   const sessions = db
     .prepare(
@@ -64,14 +68,23 @@ export function runParseHermes(
               COALESCE(ended_at, started_at) AS session_ts
        FROM sessions
        WHERE (ended_at IS NOT NULL OR input_tokens > 0 OR output_tokens > 0)
-         AND (COALESCE(ended_at, started_at) > ? OR (COALESCE(ended_at, started_at) = ? AND id > ?))
+         AND (COALESCE(ended_at, started_at) > ? OR (COALESCE(ended_at, started_at) = ? AND id > ?)
+              OR ended_at IS NULL
+              OR id IN (SELECT value FROM json_each(?)))
        ORDER BY COALESCE(ended_at, started_at), id`,
     )
     .all(
       cursor?.lastEndedAt ?? 0,
       cursor?.lastEndedAt ?? 0,
       cursor?.lastId ?? '',
+      reread,
     ) as SessionRow[]
+
+  // The cursor only moves forward: a session read again because it is open
+  // lies behind it.
+  let lastEndedAt = cursor?.lastEndedAt ?? 0
+  let lastId = cursor?.lastId ?? ''
+  const openSessionIds: string[] = []
 
   const toolCallsStmt = db.prepare(
     `SELECT id, session_id, tool_calls, timestamp
@@ -81,7 +94,11 @@ export function runParseHermes(
   )
 
   for (const session of sessions) {
-    lastCursor = { lastEndedAt: session.session_ts, lastId: session.id }
+    if (session.session_ts > lastEndedAt || (session.session_ts === lastEndedAt && session.id > lastId)) {
+      lastEndedAt = session.session_ts
+      lastId = session.id
+    }
+    if (session.ended_at == null) openSessionIds.push(session.id)
 
     const model = session.model ?? 'unknown'
     const ts = Math.round(session.started_at * 1000)
@@ -181,5 +198,9 @@ export function runParseHermes(
     }
   }
 
-  return { records, toolCalls, nextCursor: lastCursor, errors }
+  // Nothing read and nothing to forget: the stored cursor stands.
+  const nextCursor: HermesCursor | null = sessions.length > 0 || (cursor?.openSessionIds?.length ?? 0) > 0
+    ? { lastEndedAt, lastId, openSessionIds }
+    : null
+  return { records, toolCalls, nextCursor, errors }
 }

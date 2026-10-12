@@ -66,12 +66,22 @@ export function runParseGoose(db: Database.Database, options: GooseImportOptions
     FROM sessions
     WHERE model_config_json IS NOT NULL
       AND TRIM(model_config_json) != ''
-      AND (created_at > ? OR (created_at = ? AND id > ?))
     ORDER BY created_at, id
-  `).all(cursor?.lastCreatedAt ?? '', cursor?.lastCreatedAt ?? '', cursor?.lastId ?? '') as any[]
+  `).all() as any[]
 
+  // Every session is read on every run: a session row holds running totals
+  // that keep growing after it was first imported, and nothing in the row
+  // says when it last changed. The table has one row per session and a
+  // record keeps its id, so an unchanged session is rewritten as it is.
   for (const row of rows) {
-    nextCursor = { lastCreatedAt: String(row.created_at ?? ''), lastId: String(row.id ?? '') }
+    const createdAt = String(row.created_at ?? '')
+    const id = String(row.id ?? '')
+    const isNew = !cursor || createdAt > cursor.lastCreatedAt || (createdAt === cursor.lastCreatedAt && id > cursor.lastId)
+    if (isNew) nextCursor = { lastCreatedAt: createdAt, lastId: id }
+    // The record id is built from the creation time. A row whose creation
+    // time cannot be read gets the time of the import instead, so reading it
+    // again would add a record each time: such a row is imported only once.
+    if (!isNew && !Number.isFinite(parseTs(row.created_at, NaN))) continue
     const model = parseModel(row.model_config_json)
     const inputTokens = Number(row.accumulated_input_tokens ?? row.input_tokens ?? 0) || 0
     const outputTokens = Number(row.accumulated_output_tokens ?? row.output_tokens ?? 0) || 0
@@ -106,5 +116,5 @@ export function runParseGoose(db: Database.Database, options: GooseImportOptions
     })
   }
 
-  return { records, nextCursor: records.length > 0 ? nextCursor : null, errors }
+  return { records, nextCursor, errors }
 }

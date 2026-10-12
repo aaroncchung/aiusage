@@ -101,7 +101,7 @@ describe('parse-trae', () => {
     expect(result.records[0].ts).toBe(start * 1000)
   })
 
-  it('skips sessions already imported before lastImportedAt', () => {
+  it('emits a session again after it was imported, without moving lastImportedAt back', () => {
     const start = 1_700_000_000
     makeSnapshotRepo(join(snapshotDir, sessionId, 'v2'), [
       { name: `chain-start-${sessionId}`, ts: start },
@@ -116,7 +116,9 @@ describe('parse-trae', () => {
       lastImportedAt: start * 1000 + 1,
     })
 
-    expect(result.records).toHaveLength(0)
+    // The record id is stable, so writing it again updates the row in place.
+    expect(result.records).toHaveLength(1)
+    expect(result.lastImportedAt).toBe(start * 1000 + 1)
   })
 
   it('returns an error when ModularData is missing', () => {

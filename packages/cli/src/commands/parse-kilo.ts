@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3'
 import type { StatsRecord } from '@aiusage/core'
 import { calculateCost, inferProvider, recordIdFor, type RecordIdBuilder } from '@aiusage/core'
 import type { OpenCodeCursor } from '../watermark.js'
+import { isUnfinishedAssistantMessage } from './parse-opencode.js'
 
 export interface KiloImportOptions {
   dbPath: string
@@ -77,19 +78,26 @@ export function runParseKilo(
     cursor?.lastMessageId ?? '',
   ) as KiloMessageRow[]
 
-  for (const message of messages) {
-    lastCursor = {
-      lastMessageCreatedAt: message.time_created,
-      lastMessageId: message.id,
-    }
+  // As in the OpenCode import: the cursor stops in front of the first
+  // message whose usage may still change.
+  let cursorHeld = false
+  const advanceCursor = (message: KiloMessageRow): void => {
+    if (cursorHeld) return
+    lastCursor = { lastMessageCreatedAt: message.time_created, lastMessageId: message.id }
+  }
 
+  for (const message of messages) {
     let parsed: KiloMessageData
     try {
       parsed = JSON.parse(message.data) as KiloMessageData
     } catch (e) {
       errors.push(`message ${message.id}: invalid JSON: ${e instanceof Error ? e.message : e}`)
+      advanceCursor(message)
       continue
     }
+
+    if (isUnfinishedAssistantMessage(parsed, message.time_created, now)) cursorHeld = true
+    advanceCursor(message)
 
     if (parsed.role !== 'assistant' || !parsed.tokens) continue
 
@@ -139,5 +147,5 @@ export function runParseKilo(
     })
   }
 
-  return { records, nextCursor: records.length > 0 ? lastCursor : null, errors }
+  return { records, nextCursor: lastCursor, errors }
 }

@@ -284,7 +284,7 @@ describe('runParseHermes', () => {
     // First import: get both
     const result1 = runParseHermes(db, BASE_OPTIONS)
     expect(result1.records).toHaveLength(2)
-    expect(result1.nextCursor).toEqual({ lastEndedAt: 1779408600.0, lastId: 'sess_2' })
+    expect(result1.nextCursor).toEqual({ lastEndedAt: 1779408600.0, lastId: 'sess_2', openSessionIds: [] })
 
     // Second import with cursor: get nothing
     const result2 = runParseHermes(db, { ...BASE_OPTIONS, cursor: result1.nextCursor })
@@ -300,7 +300,7 @@ describe('runParseHermes', () => {
 
     const result = runParseHermes(db, BASE_OPTIONS)
 
-    expect(result.nextCursor).toEqual({ lastEndedAt: 1779408400.0, lastId: 'sess_1' })
+    expect(result.nextCursor).toEqual({ lastEndedAt: 1779408400.0, lastId: 'sess_1', openSessionIds: [] })
   })
 })
 

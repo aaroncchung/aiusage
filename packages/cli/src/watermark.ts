@@ -41,6 +41,13 @@ const CURRENT_CODEFUSE_PARSER_VERSION = 3
  * into the record it copies, which gets the calls.
  */
 const CURRENT_CLAUDE_CODE_PARSER_VERSION = 2
+/**
+ * v1: the OpenCode cursor no longer moves past a message that is still being
+ * written, and Kilo no longer shares it (issues #82, #83). The cursor is reset
+ * once so messages either bug skipped are imported; records keep their ids,
+ * so rows that were already imported are updated in place.
+ */
+const CURRENT_OPENCODE_PARSER_VERSION = 1
 
 export interface WatermarkEntry {
   offset: number
@@ -53,6 +60,12 @@ export interface WatermarkEntry {
 export interface HermesCursor {
   lastEndedAt: number  // Unix timestamp in seconds (float)
   lastId: string
+  /**
+   * Sessions that had no ended_at when they were last read. They are read
+   * again on the next run whatever the cursor says, so the usage a session
+   * has when it ends is not missed.
+   */
+  openSessionIds?: string[]
 }
 
 export interface OpenCodeCursor {
@@ -68,6 +81,14 @@ export interface QoderCursor {
 export interface CursorCursor {
   lastCreatedAt: number  // Unix timestamp in milliseconds (composerData.createdAt)
   lastId: string         // composerId
+  /**
+   * What each conversation looked like when it was last read (composerId to
+   * a fingerprint of its bubble count and update markers). A conversation is
+   * read again when its fingerprint changes. A cursor without this map was
+   * written by a release that skipped conversations by creation time, and
+   * every conversation is read once more.
+   */
+  seen?: Record<string, string>
 }
 
 export interface TimestampIdCursor {
@@ -91,8 +112,10 @@ export interface WatermarkState {
   antigravityParserVersion?: number
   codefuseParserVersion?: number
   claudeCodeParserVersion?: number
+  opencodeParserVersion?: number
   toolCallBackfillVersion?: number
   opencode?: OpenCodeCursor | null
+  kilo?: OpenCodeCursor | null
   hermes?: HermesCursor | null
   qoder?: QoderCursor | null
   cursor?: CursorCursor | null
@@ -116,6 +139,7 @@ function defaultState(): WatermarkState {
     antigravityParserVersion: CURRENT_ANTIGRAVITY_PARSER_VERSION,
     codefuseParserVersion: CURRENT_CODEFUSE_PARSER_VERSION,
     claudeCodeParserVersion: CURRENT_CLAUDE_CODE_PARSER_VERSION,
+    opencodeParserVersion: CURRENT_OPENCODE_PARSER_VERSION,
   }
 }
 
@@ -178,8 +202,10 @@ export class WatermarkManager {
           antigravityParserVersion: parsed.antigravityParserVersion,
           codefuseParserVersion: parsed.codefuseParserVersion,
           claudeCodeParserVersion: parsed.claudeCodeParserVersion,
+          opencodeParserVersion: parsed.opencodeParserVersion,
           toolCallBackfillVersion: parsed.toolCallBackfillVersion,
           opencode: parsed.opencode ?? null,
+          kilo: parsed.kilo ?? null,
           hermes: parsed.hermes ?? null,
           qoder: parsed.qoder ?? null,
           cursor: parsed.cursor ?? null,
@@ -224,6 +250,13 @@ export class WatermarkManager {
         state.files['claude-code'] = {}
         state.claudeCodeParserVersion = CURRENT_CLAUDE_CODE_PARSER_VERSION
       }
+      if ((state.opencodeParserVersion ?? 0) < CURRENT_OPENCODE_PARSER_VERSION) {
+        // v1: the cursor moved past messages whose tokens were not written
+        // yet, and the Kilo import moved it past OpenCode messages it had
+        // never read; import opencode.db from the start once.
+        state.opencode = null
+        state.opencodeParserVersion = CURRENT_OPENCODE_PARSER_VERSION
+      }
       return state
     } catch {
       return defaultState()
@@ -262,6 +295,15 @@ export class WatermarkManager {
 
   setOpenCodeCursor(cursor: OpenCodeCursor): void {
     this.data.opencode = cursor
+  }
+
+  /** Kilo's own cursor. It starts empty: kilo.db used to be read from OpenCode's. */
+  getKiloCursor(): OpenCodeCursor | null {
+    return this.data.kilo ?? null
+  }
+
+  setKiloCursor(cursor: OpenCodeCursor): void {
+    this.data.kilo = cursor
   }
 
   getHermesCursor(): HermesCursor | null {

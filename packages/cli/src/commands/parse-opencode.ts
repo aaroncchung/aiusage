@@ -56,6 +56,34 @@ interface ParsedPartData {
   tool?: string
 }
 
+/**
+ * How long an assistant message that looks unfinished holds the cursor back.
+ * A response does not take a day; a message that is still unfinished after
+ * that was abandoned (the process died), and waiting for it would make every
+ * later run read everything after it again, forever.
+ */
+export const UNFINISHED_MESSAGE_MAX_AGE_MS = 24 * 60 * 60 * 1000
+
+/**
+ * True for an assistant message whose usage may still change. OpenCode (and
+ * Kilo, which shares the schema) inserts the assistant message with zero
+ * tokens when a response starts and writes the tokens when it ends. The
+ * cursor must not move past such a message, or the tokens it gets later are
+ * never imported.
+ */
+export function isUnfinishedAssistantMessage(
+  parsed: { role?: string; time?: { completed?: number }; tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } } },
+  timeCreated: number,
+  now: number,
+): boolean {
+  if (parsed.role !== 'assistant') return false
+  if (now - timeCreated >= UNFINISHED_MESSAGE_MAX_AGE_MS) return false
+  if (!parsed.time?.completed) return true
+  const t = parsed.tokens
+  return !t || ((t.input ?? 0) === 0 && (t.output ?? 0) === 0 && (t.reasoning ?? 0) === 0
+    && (t.cache?.read ?? 0) === 0 && (t.cache?.write ?? 0) === 0)
+}
+
 export function runParseOpenCode(
   db: Database.Database,
   options: OpenCodeImportOptions,
@@ -86,20 +114,27 @@ export function runParseOpenCode(
      ORDER BY time_created, id`,
   )
 
-  for (const message of messages) {
-    // Always advance cursor past every message we visit, including skipped ones
-    lastCursor = {
-      lastMessageCreatedAt: message.time_created,
-      lastMessageId: message.id,
-    }
+  // The cursor stops in front of the first message that may still change.
+  // Everything after it is read again on the next run; records keep their
+  // ids, so that updates rows in place and leaves unchanged ones alone.
+  let cursorHeld = false
+  const advanceCursor = (message: MessageRow): void => {
+    if (cursorHeld) return
+    lastCursor = { lastMessageCreatedAt: message.time_created, lastMessageId: message.id }
+  }
 
+  for (const message of messages) {
     let parsed: ParsedMessageData
     try {
       parsed = JSON.parse(message.data) as ParsedMessageData
     } catch (e) {
       errors.push(`message ${message.id}: invalid JSON: ${e instanceof Error ? e.message : e}`)
+      advanceCursor(message)
       continue
     }
+
+    if (isUnfinishedAssistantMessage(parsed, message.time_created, now)) cursorHeld = true
+    advanceCursor(message)
 
     // Only process assistant messages with tokens
     if (parsed.role !== 'assistant' || !parsed.tokens) continue
@@ -178,5 +213,5 @@ export function runParseOpenCode(
     }
   }
 
-  return { records, toolCalls, nextCursor: records.length > 0 ? lastCursor : null, errors }
+  return { records, toolCalls, nextCursor: lastCursor, errors }
 }

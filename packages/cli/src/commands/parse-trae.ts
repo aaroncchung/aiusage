@@ -123,17 +123,23 @@ export function runParseTrae(options: TraeImportOptions): TraeImportResult {
   try { entries = readdirSync(dataDir, { withFileTypes: true }) }
   catch (e) { return { records, toolCalls, lastImportedAt: latestTs, errors: [String(e)] } }
 
+  // Every session is emitted on every run. Its tags are read either way, a
+  // session keeps gaining turns after it was first imported, and its record
+  // id is stable, so an unchanged session is rewritten as it is. Skipping by
+  // start time dropped every session that started before one visited earlier
+  // in the same pass, and directories are listed by name, not by start time.
+  const sessions: SessionTag[] = []
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
     const repoPath = join(dataDir, entry.name, 'v2')
     if (!existsSync(join(repoPath, '.git'))) continue
 
     const session = parseSessionTags(repoPath)
-    if (!session) continue
+    if (session) sessions.push(session)
+  }
+  sessions.sort((a, b) => a.startTs - b.startTs || a.sessionId.localeCompare(b.sessionId))
 
-    // Skip already-imported sessions
-    if (session.startTs < latestTs) continue
-
+  for (const session of sessions) {
     if (session.startTs > latestTs) latestTs = session.startTs
 
     // Estimate tokens from chat turns: ~200 input + ~800 output per turn (heuristic)

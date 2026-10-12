@@ -31,6 +31,8 @@ interface ComposerRow {
 interface ComposerData {
   composerId: string
   createdAt: number
+  /** What tells one state of the conversation from the next; see `CursorCursor.seen`. */
+  fingerprint: string
   usageData?: {
     default?: {
       costInCents?: number
@@ -131,6 +133,19 @@ export function runParseCursor(
     .prepare(`SELECT key, CAST(value AS TEXT) as value FROM cursorDiskKV WHERE key >= 'composerData:' AND key < 'composerData;' AND length(value) > 100`)
     .all() as ComposerRow[]
 
+  // Count the bubbles of every conversation. Only keys are read, so the scan
+  // stays inside the key index and never touches a bubble's value.
+  const bubbleCounts = new Map<string, number>()
+  const bubbleKeys = db
+    .prepare(`SELECT key FROM cursorDiskKV WHERE key >= 'bubbleId:' AND key < 'bubbleId;'`)
+    .iterate() as IterableIterator<{ key: string }>
+  for (const { key } of bubbleKeys) {
+    const end = key.indexOf(':', 'bubbleId:'.length)
+    if (end < 0) continue
+    const composerId = key.slice('bubbleId:'.length, end)
+    bubbleCounts.set(composerId, (bubbleCounts.get(composerId) ?? 0) + 1)
+  }
+
   // Parse and filter composerData entries
   const composers: ComposerData[] = []
   for (const row of composerRows) {
@@ -143,6 +158,15 @@ export function runParseCursor(
       composers.push({
         composerId,
         createdAt,
+        // A conversation keeps its creation time while it gains bubbles, so
+        // that time cannot say whether it has to be read again. Its bubble
+        // count can, together with the markers Cursor itself updates.
+        fingerprint: [
+          bubbleCounts.get(composerId) ?? 0,
+          typeof j.lastUpdatedAt === 'number' ? j.lastUpdatedAt : '',
+          typeof j.status === 'string' ? j.status : '',
+          j.usageData?.default?.costInCents ?? '',
+        ].join(':'),
         usageData: j.usageData,
       })
     } catch {
@@ -157,18 +181,24 @@ export function runParseCursor(
       : a.composerId.localeCompare(b.composerId),
   )
 
-  // Apply cursor filter: skip already-processed conversations
-  const filtered = cursor
-    ? composers.filter(
-        (c) =>
-          c.createdAt > cursor.lastCreatedAt ||
-          (c.createdAt === cursor.lastCreatedAt && c.composerId > cursor.lastId),
-      )
+  // Read the conversations that changed since they were last read. A cursor
+  // without `seen` comes from a release that skipped by creation time and
+  // never looked at a conversation twice: everything is read once more.
+  const seen = cursor?.seen
+  const filtered = seen
+    ? composers.filter((c) => seen[c.composerId] !== c.fingerprint)
     : composers
 
   if (filtered.length === 0) {
     return { records, toolCalls, nextCursor: lastCursor, errors }
   }
+
+  // Conversations that are gone from the database drop out of the map.
+  const nextSeen: Record<string, string> = {}
+  for (const c of composers) {
+    if (seen && seen[c.composerId] !== undefined) nextSeen[c.composerId] = seen[c.composerId]
+  }
+  const newest = composers[composers.length - 1]
 
   // Prepare statement to fetch all bubbles for a composer.
   // Range bounds instead of LIKE so the key index is used (see above);
@@ -179,7 +209,8 @@ export function runParseCursor(
 
   let processed = 0
   for (const composer of filtered) {
-    lastCursor = { lastCreatedAt: composer.createdAt, lastId: composer.composerId }
+    nextSeen[composer.composerId] = composer.fingerprint
+    lastCursor = { lastCreatedAt: newest.createdAt, lastId: newest.composerId, seen: nextSeen }
     processed += 1
     onProgress?.(processed, filtered.length, records.length)
 
@@ -248,6 +279,8 @@ export function runParseCursor(
 
       records.push(record)
     } catch (e) {
+      // Not read: leave it to be read again on the next run.
+      delete nextSeen[composer.composerId]
       errors.push(`composerId ${composer.composerId}: ${e instanceof Error ? e.message : e}`)
     }
   }

@@ -204,7 +204,7 @@ describe('runParseCursor', () => {
     // First import: get both
     const result1 = runParseCursor(db, BASE_OPTIONS)
     expect(result1.records).toHaveLength(2)
-    expect(result1.nextCursor).toEqual({ lastCreatedAt: 1779410000000, lastId: 'conv-new' })
+    expect(result1.nextCursor).toMatchObject({ lastCreatedAt: 1779410000000, lastId: 'conv-new' })
 
     // Second import with cursor: get nothing
     const result2 = runParseCursor(db, { ...BASE_OPTIONS, cursor: result1.nextCursor })
@@ -222,11 +222,12 @@ describe('runParseCursor', () => {
     insertComposer(db, 'conv-3', 1779420000000, {})
     insertBubble(db, 'conv-3', 'b-3', 2, 3000, 300)
 
-    // Use cursor pointing after conv-1
-    const result = runParseCursor(db, {
-      ...BASE_OPTIONS,
-      cursor: { lastCreatedAt: 1779400000000, lastId: 'conv-1' },
-    })
+    // Use the cursor of a run that saw only conv-1
+    const seenFirst = db.prepare(`SELECT key, value FROM cursorDiskKV WHERE key LIKE '%conv-2%' OR key LIKE '%conv-3%'`).all() as { key: string; value: string }[]
+    db.prepare(`DELETE FROM cursorDiskKV WHERE key LIKE '%conv-2%' OR key LIKE '%conv-3%'`).run()
+    const { nextCursor } = runParseCursor(db, BASE_OPTIONS)
+    for (const row of seenFirst) db.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run(row.key, row.value)
+    const result = runParseCursor(db, { ...BASE_OPTIONS, cursor: nextCursor })
 
     expect(result.records).toHaveLength(2)
     expect(result.records[0].sessionId).toBe('conv-2')
@@ -239,7 +240,7 @@ describe('runParseCursor', () => {
 
     const result = runParseCursor(db, BASE_OPTIONS)
 
-    expect(result.nextCursor).toEqual({ lastCreatedAt: 1779400000000, lastId: 'conv-x' })
+    expect(result.nextCursor).toMatchObject({ lastCreatedAt: 1779400000000, lastId: 'conv-x' })
   })
 
   it('advances nextCursor past conversations with no token data (avoids re-scan)', () => {
@@ -249,7 +250,8 @@ describe('runParseCursor', () => {
     const result = runParseCursor(db, BASE_OPTIONS)
 
     expect(result.records).toHaveLength(0)
-    expect(result.nextCursor).toEqual({ lastCreatedAt: 1779400000000, lastId: 'conv-empty' })
+    expect(result.nextCursor).toMatchObject({ lastCreatedAt: 1779400000000, lastId: 'conv-empty' })
+    expect(runParseCursor(db, { ...BASE_OPTIONS, cursor: result.nextCursor }).nextCursor).toBeNull()
   })
 
   it('skips malformed composerData JSON gracefully', () => {
@@ -340,7 +342,7 @@ describe('runParseCursor', () => {
     const calls: [number, number, number][] = []
     const result = runParseCursor(db, {
       ...BASE_OPTIONS,
-      cursor: { lastCreatedAt: 1779400000000, lastId: 'conv-old' },
+      cursor: runParseCursor(db, BASE_OPTIONS).nextCursor,
       onProgress: (current, total, recordsFound) => calls.push([current, total, recordsFound]),
     })
 
