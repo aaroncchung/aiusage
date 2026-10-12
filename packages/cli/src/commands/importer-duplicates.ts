@@ -93,8 +93,9 @@ export function replaceSourceRecords(db: Database.Database, tool: Tool, sourceFi
  *
  *  - `'later'`: a stored row is newer (`ts`). A conversation whose latest
  *    message is unreadable yields an earlier snapshot.
- *  - `'larger'`: a stored row counts more tokens. A transcript only grows, so
- *    a smaller estimate means lines of it could not be parsed.
+ *  - `'larger'`: a stored row counts more input or more output tokens. A
+ *    transcript only grows, so an estimate that is smaller in either
+ *    direction means lines of it could not be parsed.
  *
  * Returns whether the record was stored.
  */
@@ -111,8 +112,8 @@ export function replaceSourceSnapshot(
           `SELECT 1 FROM records WHERE tool = ? AND source_file = ? AND ${LOCAL_RECORDS_WHERE} AND ts > ? LIMIT 1`,
         ).get(tool, sourceFile, record.ts)
       : db.prepare(
-          `SELECT 1 FROM records WHERE tool = ? AND source_file = ? AND ${LOCAL_RECORDS_WHERE} AND input_tokens + output_tokens > ? LIMIT 1`,
-        ).get(tool, sourceFile, record.inputTokens + record.outputTokens)
+          `SELECT 1 FROM records WHERE tool = ? AND source_file = ? AND ${LOCAL_RECORDS_WHERE} AND (input_tokens > ? OR output_tokens > ?) LIMIT 1`,
+        ).get(tool, sourceFile, record.inputTokens, record.outputTokens)
     if (better) return false
     replaceSourceRecords(db, tool, sourceFile, [record])
     return true
@@ -224,6 +225,33 @@ function allButBest(rows: DuplicateRow[], key: (row: DuplicateRow) => string, pr
 }
 
 /**
+ * The estimates of each Cursor transcript except the one to keep. A
+ * transcript only grows, so a complete estimate is at least as large as every
+ * earlier one in input and in output: the newest row that is, is kept. When
+ * no row covers the others (every later parse missed lines an earlier one
+ * read), no row is complete and the one with the largest total is kept.
+ */
+function supersededEstimates(rows: DuplicateRow[]): string[] {
+  const bySource = new Map<string, DuplicateRow[]>()
+  for (const row of rows) {
+    const group = bySource.get(row.source_file)
+    if (group) group.push(row)
+    else bySource.set(row.source_file, [row])
+  }
+  const superseded: string[] = []
+  const newest = (a: DuplicateRow, b: DuplicateRow) => a.ts - b.ts || a.updated_at - b.updated_at
+  for (const group of bySource.values()) {
+    const maxInput = Math.max(...group.map(row => row.input_tokens))
+    const maxOutput = Math.max(...group.map(row => row.output_tokens))
+    const covering = group.filter(row => row.input_tokens === maxInput && row.output_tokens === maxOutput)
+    superseded.push(...(covering.length > 0
+      ? allButBest(group, () => '', (a, b) => Number(covering.includes(a)) - Number(covering.includes(b)) || newest(a, b))
+      : allButBest(group, () => '', (a, b) => (a.input_tokens + a.output_tokens) - (b.input_tokens + b.output_tokens) || newest(a, b))))
+  }
+  return superseded
+}
+
+/**
  * Reduce the rows the old ids left behind to one copy each, from the database
  * alone, so it also works for a source that no longer exists on disk:
  *
@@ -234,8 +262,9 @@ function allButBest(rows: DuplicateRow[], key: (row: DuplicateRow) => string, pr
  *    one by one because a parse wrote its rows one at a time and may not have
  *    stored all of them; rows that differ are different requests and stay.
  *  - Cursor transcripts: each row estimates the whole file as far as it could
- *    be parsed, so the largest estimate is kept. None is kept when the
- *    conversation is counted from `state.vscdb`.
+ *    be parsed, so the estimate that covers the others is kept (see
+ *    `supersededEstimates`). None is kept when the conversation is counted
+ *    from `state.vscdb`.
  *  - CodeBuddy IDE conversations: each row is a cumulative snapshot, so the
  *    latest one is kept.
  *
@@ -261,11 +290,8 @@ export function collapseImporterDuplicates(db: Database.Database): ImporterDupli
     // An estimate is also superseded when its conversation has a record from
     // state.vscdb: the importer drops it when it reads the transcript, and
     // this covers a transcript that is gone.
-    const cursor = deleteLocalRecords(db, allButBest(
-      transcripts,
-      row => row.source_file,
-      (a, b) => (a.input_tokens + a.output_tokens) - (b.input_tokens + b.output_tokens) || a.ts - b.ts || a.updated_at - b.updated_at,
-    )) + deleteCursorTranscriptEstimates(db, cursorDatabaseComposers(db))
+    const cursor = deleteLocalRecords(db, supersededEstimates(transcripts))
+      + deleteCursorTranscriptEstimates(db, cursorDatabaseComposers(db))
 
     // CodeBuddy IDE rows are keyed on a conversation directory and offset 0;
     // the CodeBuddy CLI's rows come from `*.jsonl` files, one per line.

@@ -21,7 +21,7 @@ const DEVICE = 'device-a'
 const PEER = 'device-b'
 const T0 = 1_780_000_000_000
 // Source overrides inherited from the environment would win over the fixtures.
-const SOURCE_OVERRIDES = ['AIUSAGE_KIRO_PATH', 'AIUSAGE_CURSOR_PATH', 'AIUSAGE_CODEBUDDY_IDE_PATH', 'AIUSAGE_CODEBUDDY_PATH', 'KIRO_HOME']
+const SOURCE_OVERRIDES = ['AIUSAGE_KIRO_PATH', 'AIUSAGE_CURSOR_PATH', 'AIUSAGE_CODEBUDDY_IDE_PATH', 'AIUSAGE_CODEBUDDY_PATH', 'CODEBUDDY_HOME', 'KIRO_HOME']
 
 function record(tool: Tool, id: string, sourceFile: string, ts: number, overrides: Partial<StatsRecord> = {}): StatsRecord {
   return {
@@ -179,6 +179,18 @@ describe('importer duplicates', () => {
       expect(count(`id LIKE 'sqlite-%'`)).toBe(2)
       expect(count(`origin = 'synced'`)).toBe(2)
       expect(count(`origin = 'local' AND source_file LIKE '%.jsonl'`)).toBe(4)
+    })
+
+    it('keeps the complete estimate of a Cursor transcript over a larger partial one', () => {
+      const path = join(scratch, 'p', 'agent-transcripts', 'c1', 'c1.jsonl')
+      insertRecord(db, oldTranscript(path, T0, 100, 300))
+      // Later parses: a complete one, then one that lost the assistant lines but saw more user text.
+      const complete = oldTranscript(path, T0 + 60_000, 600, 300)
+      insertRecord(db, complete)
+      insertRecord(db, oldTranscript(path, T0 + 120_000, 600, 0))
+
+      expect(collapseImporterDuplicates(db).cursor).toBe(2)
+      expect(ids()).toEqual([complete.id])
     })
 
     it('keeps the largest estimate of a Cursor transcript', () => {

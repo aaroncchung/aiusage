@@ -828,8 +828,9 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
               platform: devicePlatform,
             }
             // Also removes the estimates stored under the old, time-based ids.
-            // A transcript only grows: a smaller estimate than the stored one
-            // means part of the file could not be parsed, and is not stored.
+            // A transcript only grows: an estimate with less input or less
+            // output than the stored one means part of the file could not be
+            // parsed, and is not stored.
             if (replaceSourceSnapshot(db, 'cursor', filePath, record, 'larger')) parsedCount++
           }
           wm.setEntry(tool, filePath, {

@@ -163,6 +163,21 @@ describe('runParse with Cursor agent transcripts', () => {
     expect(rows().map(r => [r.input_tokens, r.output_tokens])).toEqual([[100, 300]])
   })
 
+  it('keeps the stored estimate when a partly unreadable transcript yields a larger total', async () => {
+    say('user', 100)
+    say('assistant', 300)
+    await parse()
+
+    // The assistant line is damaged and a long user message was added: 600 input, 0 output.
+    const user = (tokens: number) => JSON.stringify({ role: 'user', message: { content: [{ type: 'text', text: 'a'.repeat(tokens * 3) }] } })
+    writeFileSync(transcriptPath, user(100) + '\n' + '{"role":"assistant","message":{"content":[{"type":"text","text":"' + 'a'.repeat(900) + '\n' + user(500) + '\n')
+    clock += 60
+    utimesSync(transcriptPath, clock, clock)
+    const result = await parse()
+    expect(result.parsedCount).toBe(0)
+    expect(rows().map(r => [r.input_tokens, r.output_tokens])).toEqual([[100, 300]])
+  })
+
   it('recognises state.vscdb records whatever the folder of the database is called', async () => {
     cursorDbPath = join(scratch, 'agent-transcripts-backup', 'state.vscdb')
     mkdirSync(join(scratch, 'agent-transcripts-backup'), { recursive: true })
