@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -22,6 +22,17 @@ interface Row {
 describe('runParse with a CodeBuddy IDE conversation that gets more turns', () => {
   let dataDir: string
   let db: Database.Database
+  let inheritedOverride: string | undefined
+
+  beforeAll(() => {
+    // An override inherited from the environment would win over the fixture.
+    inheritedOverride = process.env.AIUSAGE_CODEBUDDY_IDE_PATH
+    delete process.env.AIUSAGE_CODEBUDDY_IDE_PATH
+  })
+
+  afterAll(() => {
+    if (inheritedOverride !== undefined) process.env.AIUSAGE_CODEBUDDY_IDE_PATH = inheritedOverride
+  })
 
   beforeEach(() => {
     dataDir = mkdtempSync(join(tmpdir(), 'aiu-codebuddy-'))

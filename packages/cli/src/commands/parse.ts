@@ -24,7 +24,7 @@ import { runParseZcode } from './parse-zcode.js'
 import { runParseTrae } from './parse-trae.js'
 import { runParseCodeBuddy } from './parse-codebuddy.js'
 import { runParseAntigravity } from './parse-antigravity.js'
-import { cursorTranscriptComposerId, deleteCursorTranscriptEstimates, deleteLegacyKiroLogRecords, hasCursorDatabaseRecord, repairImporterDuplicates, replaceSourceRecords } from './importer-duplicates.js'
+import { cursorTranscriptComposerId, deleteCursorTranscriptEstimates, hasCursorDatabaseRecord, prefixFingerprint, repairImporterDuplicates, replaceKiroLogLines, replaceSourceRecords, replaceSourceSnapshot } from './importer-duplicates.js'
 import type { ProgressInfo } from '../progress.js'
 
 interface ParseResult {
@@ -588,7 +588,10 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
         // appends to its -wal without changing the main file's size, so the
         // watermark's offset would hide every later message. Those files are
         // re-read in full instead and deduplicated by record id.
-        const skipUnchangedFile = !(tool === 'kelivo' && isKelivoDatabaseFile(filePath))
+        // A Kiro token log that changed without growing was replaced; its
+        // branch below notices and reads it from the start.
+        const kiroLogChanged = tool === 'kiro' && filePath.endsWith('.jsonl') && !!entry && entry.mtime !== stat.mtimeMs
+        const skipUnchangedFile = !(tool === 'kelivo' && isKelivoDatabaseFile(filePath)) && !kiroLogChanged
         if (skipUnchangedFile && offset >= stat.size) {
           onProgress({ phase: 'Parsing logs', tool, current: toolIndex, total: toolTotal, records: parsedCount, toolCalls: toolCallCount })
           continue // No new data
@@ -673,9 +676,11 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
 
         if (tool === 'kiro' && filePath.endsWith('.jsonl')) {
           const buffer = readFileSync(filePath)
-          // The log is append-only, so the watermark sits where a line ended.
-          // Anywhere else means the file was replaced: read it from the start.
-          const startOffset = offset > 0 && (buffer[offset - 1] === 0x0a || buffer[offset] === 0x0a) ? offset : 0
+          // The log is append-only, so the part read last time is still there
+          // byte for byte. If it is not, the file was replaced: read it from
+          // the start.
+          const startOffset = offset > 0 && entry?.headFingerprint !== undefined
+            && entry.headFingerprint === prefixFingerprint(buffer, offset) ? offset : 0
           const records: StatsRecord[] = []
           let nextOffset = buffer.length
           // Lines before the watermark are already stored.
@@ -729,17 +734,14 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
               if (newline === -1) nextOffset = thisOffset
             }
           }
-          db.transaction(() => {
-            // Read from the first line, the log replaces whatever the old,
-            // time-based ids left of it.
-            if (startOffset === 0) deleteLegacyKiroLogRecords(db, filePath)
-            for (const record of records) insertRecord(db, record)
-          })()
+          // Each line also replaces what the old, time-based ids left of it.
+          replaceKiroLogLines(db, filePath, records)
           parsedCount += records.length
           wm.setEntry(tool, filePath, {
             offset: nextOffset,
             size: stat.size,
             mtime: stat.mtimeMs,
+            headFingerprint: prefixFingerprint(buffer, nextOffset) ?? undefined,
           })
           wm.save()
           onProgress({ phase: 'Parsing logs', tool, current: toolIndex, total: toolTotal, records: parsedCount, toolCalls: toolCallCount })
@@ -1385,9 +1387,11 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
         exchangeRate,
       })
       // One record per conversation: a conversation imported again replaces
-      // its record, including one stored under the old, time-based id.
-      for (const record of result.records) replaceSourceRecords(db, 'codebuddy', record.sourceFile, [record])
-      parsedCount += result.records.length
+      // its record, including one stored under the old, time-based id, unless
+      // what is stored is newer than what could be read.
+      for (const record of result.records) {
+        if (replaceSourceSnapshot(db, 'codebuddy', record.sourceFile, record)) parsedCount++
+      }
       errors.push(...result.errors)
       if (result.nextCursor > cbCursor) {
         wm.setCodeBuddyIdeCursor(result.nextCursor)

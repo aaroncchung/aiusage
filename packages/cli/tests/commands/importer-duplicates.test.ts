@@ -20,6 +20,8 @@ const projectsDir = join(homedir(), '.cursor', 'projects')
 const DEVICE = 'device-a'
 const PEER = 'device-b'
 const T0 = 1_780_000_000_000
+// Source overrides inherited from the environment would win over the fixtures.
+const SOURCE_OVERRIDES = ['AIUSAGE_KIRO_PATH', 'AIUSAGE_CURSOR_PATH', 'AIUSAGE_CODEBUDDY_IDE_PATH', 'AIUSAGE_CODEBUDDY_PATH', 'KIRO_HOME']
 
 function record(tool: Tool, id: string, sourceFile: string, ts: number, overrides: Partial<StatsRecord> = {}): StatsRecord {
   return {
@@ -53,7 +55,8 @@ describe('importer duplicates', () => {
 
   beforeAll(() => {
     // Keep the default Kiro and CodeBuddy locations inside the test home on every platform.
-    for (const key of ['APPDATA', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME']) savedEnv[key] = process.env[key]
+    for (const key of ['APPDATA', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME', ...SOURCE_OVERRIDES]) savedEnv[key] = process.env[key]
+    for (const key of SOURCE_OVERRIDES) delete process.env[key]
     process.env.APPDATA = join(homedir(), 'AppData', 'Roaming')
     process.env.XDG_DATA_HOME = join(homedir(), '.local', 'share')
     process.env.XDG_CONFIG_HOME = join(homedir(), '.config')
@@ -89,16 +92,39 @@ describe('importer duplicates', () => {
     (db.prepare(`SELECT id FROM records WHERE ${where} ORDER BY id`).all() as Array<{ id: string }>).map(r => r.id)
 
   /** Three parses of a growing Kiro log (2, 3 and 4 lines), as the old importer left them: 9 rows. */
-  function seedKiroGenerations(path: string): StatsRecord[] {
+  function seedKiroGenerations(path: string, lineLength = 80): StatsRecord[] {
     const rows: StatsRecord[] = []
     for (const [generation, lines] of [2, 3, 4].entries()) {
-      for (let line = 0; line < lines; line++) rows.push(oldKiro(path, line * 80, T0 + generation * 60_000))
+      for (let line = 0; line < lines; line++) rows.push(oldKiro(path, line * lineLength, T0 + generation * 60_000))
     }
     for (const row of rows) insertRecord(db, row)
     return rows
   }
 
   describe('collapseImporterDuplicates', () => {
+    it('keeps every line of a Kiro token log whose newest parse did not store all of them', () => {
+      const path = join(scratch, 'gone', 'tokens_generated.jsonl')
+      // An earlier parse stored three lines; the latest one was interrupted after the first.
+      for (const offset of [0, 80, 160]) insertRecord(db, oldKiro(path, offset, T0))
+      const latest = oldKiro(path, 0, T0 + 60_000)
+      insertRecord(db, latest)
+
+      expect(collapseImporterDuplicates(db).kiro).toBe(1)
+      expect(ids()).toEqual([latest.id, oldKiro(path, 80, T0).id, oldKiro(path, 160, T0).id].sort())
+      expect(sum('input_tokens')).toBe(300)
+    })
+
+    it('keeps one row for a Kiro line stored before and after the device had an id', () => {
+      const path = join(scratch, 'tokens_generated.jsonl')
+      const current = record('kiro', generateRecordId(DEVICE, path, 0), path, T0, { lineOffset: 0 })
+      insertRecord(db, record('kiro', generateRecordId('unknown', path, 0), path, T0 + 5, { lineOffset: 0 }))
+      insertRecord(db, current)
+      insertRecord(db, oldKiro(path, 0, T0 + 99_000))
+
+      expect(collapseImporterDuplicates(db).kiro).toBe(2)
+      expect(ids()).toEqual([current.id])
+    })
+
     it('keeps the newest parse of a Kiro token log and deletes the earlier ones', () => {
       const path = join(scratch, 'gone', 'tokens_generated.jsonl')
       const rows = seedKiroGenerations(path)
@@ -275,12 +301,12 @@ describe('importer duplicates', () => {
       const line = request()
       writeFileSync(log, line.repeat(4))
       writeFileSync(join(aiusageDir, 'config.json'), JSON.stringify({ sources: { kiro: root } }))
-      seedKiroGenerations(log)
+      const length = Buffer.byteLength(line, 'utf-8')
+      seedKiroGenerations(log, length)
       writeOldWatermark({ kiro: [log] })
 
       const result = await runParse(db, 'kiro')
       expect(result.errors).toEqual([])
-      const length = Buffer.byteLength(line, 'utf-8')
       expect(ids()).toEqual([0, 1, 2, 3].map(i => generateRecordId(DEVICE, log, i * length)).sort())
       expect(sum('input_tokens')).toBe(400)
 
@@ -288,6 +314,62 @@ describe('importer duplicates', () => {
       const again = await runParse(db, 'kiro')
       expect(again.parsedCount).toBe(0)
       expect(count()).toBe(4)
+    })
+
+    it('keeps what was stored for Kiro lines that cannot be read again', async () => {
+      const root = join(scratch, 'kiro')
+      mkdirSync(root, { recursive: true })
+      const log = join(root, 'tokens_generated.jsonl')
+      const line = request()
+      const length = Buffer.byteLength(line, 'utf-8')
+      // The log was recreated and holds one request and an unfinished line.
+      writeFileSync(log, line + '{')
+      writeFileSync(join(aiusageDir, 'config.json'), JSON.stringify({ sources: { kiro: root } }))
+      const rows = seedKiroGenerations(log, length)
+      writeOldWatermark({ kiro: [log] })
+
+      await runParse(db, 'kiro')
+      // Offset 0 was read again; the lines at the other offsets keep their newest old row.
+      expect(ids()).toEqual([generateRecordId(DEVICE, log, 0), ...rows.slice(6).map(r => r.id)].sort())
+      expect(sum('input_tokens')).toBe(400)
+    })
+
+    it('does not store a Kiro line twice when it was first read before the device had an id', async () => {
+      const root = join(scratch, 'kiro')
+      mkdirSync(root, { recursive: true })
+      const log = join(root, 'tokens_generated.jsonl')
+      const line = request()
+      const length = Buffer.byteLength(line, 'utf-8')
+      writeFileSync(log, line.repeat(2))
+      writeFileSync(join(aiusageDir, 'config.json'), JSON.stringify({ sources: { kiro: root } }))
+      // Read before `init` (ids built from 'unknown'), relabelled since; watermark.json was lost.
+      for (const i of [0, 1]) {
+        insertRecord(db, record('kiro', generateRecordId('unknown', log, i * length), log, T0, { lineOffset: i * length }))
+      }
+
+      await runParse(db, 'kiro')
+      expect(ids()).toEqual([0, 1].map(i => generateRecordId(DEVICE, log, i * length)).sort())
+    })
+
+    it('keeps a newer CodeBuddy IDE snapshot when only an older message can be read', async () => {
+      const dataDir = join(scratch, 'cb-data')
+      const conversation = join(dataDir, 'default', 'CodeBuddyIDE', 'ws', 'history', 'session-1', 'conv-1')
+      mkdirSync(join(conversation, 'messages'), { recursive: true })
+      const latest = Date.parse('2026-07-01T07:00:00.000Z')
+      writeFileSync(join(conversation, 'messages', 'turn-1.json'), JSON.stringify({
+        role: 'assistant', message: '{}', id: 'a-1', createdAt: '2026-07-01T06:00:00.000Z',
+        extra: JSON.stringify({ modelId: 'deepseek-v4-flash', statsSnapshot: { cachedInputTokens: 0, cacheMissTokens: 1000, lastOutputTokens: 50 } }),
+      }))
+      // The message of the second turn is damaged.
+      writeFileSync(join(conversation, 'messages', 'turn-2.json'), '{"role":"assist')
+      writeFileSync(join(aiusageDir, 'config.json'), JSON.stringify({ sources: { 'codebuddy-ide': dataDir } }))
+      const stored = oldConversation(conversation, latest, 2500)
+      insertRecord(db, stored)
+      writeFileSync(watermarkPath, JSON.stringify({ files: {}, codebuddyIde: latest }))
+
+      const result = await runParse(db, 'codebuddy')
+      expect(result.parsedCount).toBe(0)
+      expect(db.prepare(`SELECT id, input_tokens FROM records`).all()).toEqual([{ id: stored.id, input_tokens: 2500 }])
     })
 
     it('keeps one copy of a Kiro token log that no longer exists', async () => {

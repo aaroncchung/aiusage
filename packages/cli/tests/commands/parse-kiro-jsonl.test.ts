@@ -29,6 +29,7 @@ describe('runParse with a Kiro token log (tokens_generated.jsonl)', () => {
   beforeAll(() => {
     // Keep the default Kiro locations inside the test home on every platform.
     for (const key of ['APPDATA', 'XDG_DATA_HOME', 'KIRO_HOME', 'AIUSAGE_KIRO_PATH']) savedEnv[key] = process.env[key]
+    // An override inherited from the environment would win over the fixture.
     process.env.APPDATA = join(homedir(), 'AppData', 'Roaming')
     process.env.XDG_DATA_HOME = join(homedir(), '.local', 'share')
     delete process.env.KIRO_HOME
@@ -158,6 +159,44 @@ describe('runParse with a Kiro token log (tokens_generated.jsonl)', () => {
     write('\n' + request())
     await runParse(db, 'kiro')
     expect(totals()).toEqual({ n: 3, input: 300, output: 30 })
+  })
+
+  it('reads a log from the start again when it was replaced by one with the same line lengths', async () => {
+    write(request() + request())
+    await runParse(db, 'kiro')
+
+    const other = () => request({ promptTokens: 200 })
+    write(other() + other() + other(), true)
+    const result = await runParse(db, 'kiro')
+    expect(result.parsedCount).toBe(3)
+    expect(rows().map(r => r.input_tokens)).toEqual([200, 200, 200])
+
+    const again = await runParse(db, 'kiro')
+    expect(again.parsedCount).toBe(0)
+  })
+
+  it('reads a log from the start again when it was replaced by one of the same size or shorter', async () => {
+    write(request() + request())
+    await runParse(db, 'kiro')
+
+    write(request({ promptTokens: 300 }) + request({ promptTokens: 300 }), true)
+    await runParse(db, 'kiro')
+    expect(rows().map(r => r.input_tokens)).toEqual([300, 300])
+
+    write(request({ promptTokens: 500 }), true)
+    await runParse(db, 'kiro')
+    // The first line was replaced in place; the second keeps the request stored for it.
+    expect(rows().map(r => r.input_tokens)).toEqual([500, 300])
+  })
+
+  it('does not read a log again whose time changed but whose content did not', async () => {
+    write(request() + request())
+    await runParse(db, 'kiro')
+    const before = rows()
+    write('')
+    const result = await runParse(db, 'kiro')
+    expect(result.parsedCount).toBe(0)
+    expect(rows()).toEqual(before)
   })
 
   it('reads a log from the start again when it was replaced by a longer one', async () => {
