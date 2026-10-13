@@ -173,8 +173,15 @@ describe.each([
     expect(second.errors).toHaveLength(1)
     expect(second.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 50_000, lastMessageId: 'msg_2', pendingMessageIds: ['msg_1'] })
 
+    // And in a third: valid JSON that is not a message.
+    putMessage(db, 'msg_1', NOW - 60_000, '[]')
+    const again = run(db, second.nextCursor)
+    expect(again.records).toEqual([])
+    expect(again.errors).toHaveLength(1)
+    expect(again.nextCursor).toEqual(second.nextCursor)
+
     putMessage(db, 'msg_1', NOW - 60_000, assistant(300, 30))
-    const third = run(db, second.nextCursor)
+    const third = run(db, again.nextCursor)
     expect(third.records.map(r => r.inputTokens)).toEqual([300])
     expect(third.errors).toEqual([])
     expect(third.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 50_000, lastMessageId: 'msg_2' })
@@ -294,6 +301,85 @@ describe('runParse with both opencode.db and kilo.db (#82)', () => {
     await runParse(cache, undefined, options)
 
     expect(tokens()).toEqual([100, 200, 300])
+  })
+
+  it('replaces the tool calls of an OpenCode message that is read again', async () => {
+    const opencode = sourceDb('opencode.db', MESSAGE_SCHEMA)
+    // Has tokens but is not complete, so it is read again.
+    putMessage(opencode, 'msg_1', 1000, assistant(100, 10, null))
+    const putPart = (id: string, timeCreated: number, data: string) =>
+      opencode.prepare('INSERT OR REPLACE INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)').run(id, 'msg_1', 'sess', timeCreated, data)
+    putPart('part_1', 1001, '{not json')
+    putPart('part_2', 1002, JSON.stringify({ type: 'tool', tool: 'read' }))
+    const options = { openCodeDbPath: join(dir, 'opencode.db') }
+    const calls = () => cache.prepare('SELECT name, call_index FROM tool_calls ORDER BY call_index').all()
+
+    await runParse(cache, undefined, options)
+    expect(calls()).toEqual([{ name: 'read', call_index: 0 }])
+
+    // The earlier part becomes readable: the call that was stored moves up.
+    putPart('part_1', 1001, JSON.stringify({ type: 'tool', tool: 'write' }))
+    await runParse(cache, undefined, options)
+
+    expect(calls()).toEqual([{ name: 'write', call_index: 0 }, { name: 'read', call_index: 1 }])
+  })
+
+  it('replaces the tool calls of a Hermes session that is read again', async () => {
+    const hermes = sourceDb('state.db', HERMES_SCHEMA)
+    hermes.prepare('INSERT INTO sessions (id, model, started_at, ended_at, input_tokens, output_tokens) VALUES (?, ?, ?, ?, ?, ?)').run('open', 'gpt-4o', 100, null, 1000, 100)
+    const putCalls = (id: number, toolCalls: string) =>
+      hermes.prepare('INSERT OR REPLACE INTO messages (id, session_id, role, tool_calls, timestamp) VALUES (?, ?, ?, ?, ?)').run(id, 'open', 'assistant', toolCalls, 100 + id)
+    putCalls(1, '{not json')
+    putCalls(2, JSON.stringify([{ function: { name: 'read' } }]))
+    const options = { hermesDbPath: join(dir, 'state.db') }
+    const calls = () => cache.prepare('SELECT name, call_index FROM tool_calls ORDER BY call_index').all()
+
+    await runParse(cache, undefined, options)
+    expect(calls()).toEqual([{ name: 'read', call_index: 0 }])
+
+    putCalls(1, JSON.stringify([{ function: { name: 'write' } }]))
+    await runParse(cache, undefined, options)
+
+    expect(calls()).toEqual([{ name: 'write', call_index: 0 }, { name: 'read', call_index: 1 }])
+  })
+
+  it('does not replace a stored Cursor total with one that is short of a bubble', async () => {
+    const cursorDb = sourceDb('state.vscdb', CURSOR_SCHEMA)
+    const put = (key: string, value: unknown) =>
+      cursorDb.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run(key, typeof value === 'string' ? value : JSON.stringify(value))
+    const composer = (id: string, createdAt: number) => put(`composerData:${id}`, {
+      _v: 3, composerId: id, createdAt, usageData: {}, fullConversationHeadersOnly: [], conversationMap: {}, status: 'none',
+    })
+    const bubble = (inputTokens: number) => ({ type: 2, tokenCount: { inputTokens, outputTokens: 1 } })
+    composer('conv', 1_779_400_000_000)
+    put('bubbleId:conv:b1', bubble(100))
+    put('bubbleId:conv:b2', bubble(200))
+    const options = { cursorDbPath: join(dir, 'state.vscdb') }
+    const target = 'cloud:https://sync.example.test'
+    const rows = () => cache.prepare("SELECT id, session_id, input_tokens, updated_at FROM records WHERE tool = 'cursor' ORDER BY ts").all() as Array<{ id: string; session_id: string; input_tokens: number; updated_at: number }>
+
+    await runParse(cache, undefined, options)
+    const first = rows()
+    expect(first.map(r => r.input_tokens)).toEqual([300])
+    markRecordVersionsSynced(cache, first.map(r => ({ id: r.id, updatedAt: r.updated_at })), target)
+
+    // One bubble cannot be read any more; a new conversation has one too.
+    put('bubbleId:conv:b2', '{not json')
+    composer('fresh', 1_779_410_000_000)
+    put('bubbleId:fresh:b1', bubble(50))
+    put('bubbleId:fresh:b2', 'null')
+    const second = await runParse(cache, undefined, options)
+
+    // The stored total stands and stays synced; the conversation without a
+    // record gets what could be read. Both are reported.
+    expect(rows()).toEqual([first[0], expect.objectContaining({ session_id: 'fresh', input_tokens: 50 })])
+    expect(getUnsyncedRecords(cache, target, DEVICE).map(r => r.sessionId)).toEqual(['fresh'])
+    expect(second.errors).toHaveLength(2)
+
+    // Readable again, with more usage: the record follows.
+    put('bubbleId:conv:b2', bubble(900))
+    await runParse(cache, undefined, options)
+    expect(rows().map(r => r.input_tokens)).toEqual([1000, 50])
   })
 
   it('reads a Goose session again on every run and leaves an unchanged one synced', async () => {
@@ -418,6 +504,36 @@ describe('Hermes import (#83)', () => {
     expect(run(db, second.nextCursor).records).toEqual([])
   })
 
+  it('reads a session that had no usage while it was open, once it has ended behind the cursor', () => {
+    const db = sourceDb('state.db', HERMES_SCHEMA)
+    // Nothing to import for it yet.
+    put(db, 'slow', 10, null, 0, 0)
+    put(db, 'fast', 20, 30, 10, 1)
+    const first = run(db, null)
+    expect(first.records.map(r => r.sessionId)).toEqual(['fast'])
+    expect(first.nextCursor).toEqual({ lastEndedAt: 30, lastId: 'fast', openSessionIds: ['slow'] })
+
+    put(db, 'slow', 10, 25, 9000, 900)
+    const second = run(db, first.nextCursor)
+
+    expect(second.records.map(r => [r.sessionId, r.inputTokens])).toEqual([['slow', 9000]])
+    expect(second.nextCursor).toEqual({ lastEndedAt: 30, lastId: 'fast', openSessionIds: [] })
+  })
+
+  it('tracks an open session without usage when nothing else is read, and forgets it when it is deleted', () => {
+    const db = sourceDb('state.db', HERMES_SCHEMA)
+    put(db, 'done', 10, 20, 1000, 100)
+    const first = run(db, null)
+
+    put(db, 'idle', 30, null, 0, 0)
+    const second = run(db, first.nextCursor)
+    expect(second.records).toEqual([])
+    expect(second.nextCursor).toEqual({ lastEndedAt: 20, lastId: 'done', openSessionIds: ['idle'] })
+
+    db.prepare('DELETE FROM sessions WHERE id = ?').run('idle')
+    expect(run(db, second.nextCursor).nextCursor).toEqual({ lastEndedAt: 20, lastId: 'done', openSessionIds: [] })
+  })
+
   it('does not read ended sessions behind the cursor again', () => {
     const db = sourceDb('state.db', HERMES_SCHEMA)
     put(db, 'done', 10, 20, 1000, 100)
@@ -513,6 +629,22 @@ describe('Cursor import (#83)', () => {
       ['growing', 1000, 400],
     ])
     expect(second.records[1].id).toBe(first.records[0].id)
+  })
+
+  it('sets the record of a conversation with an unreadable bubble apart and reports it', () => {
+    const db = sourceDb('state.vscdb', CURSOR_SCHEMA)
+    putComposer(db, 'whole', 1_779_400_000_000)
+    putBubble(db, 'whole', 'b1', 1000, 100)
+    putBubbleWithoutTokens(db, 'whole', 'b2')
+    putComposer(db, 'short', 1_779_410_000_000)
+    putBubble(db, 'short', 'b1', 100, 10)
+    db.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run('bubbleId:short:b2', '{not json')
+
+    const result = run(db, null)
+
+    expect(result.records.map(r => [r.sessionId, r.inputTokens])).toEqual([['whole', 1000]])
+    expect(result.partialRecords.map(r => [r.sessionId, r.inputTokens])).toEqual([['short', 100]])
+    expect(result.errors).toEqual(['composerId short: 1 of 2 bubbles could not be read'])
   })
 
   it('reads every conversation for a cursor written by an earlier release', () => {

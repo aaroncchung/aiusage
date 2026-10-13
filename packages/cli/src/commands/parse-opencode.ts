@@ -155,7 +155,7 @@ export function runParseOpenCode(
     let parsed: ParsedMessageData
     try {
       parsed = JSON.parse(message.data) as ParsedMessageData
-      if (parsed === null || typeof parsed !== 'object') throw new Error('not an object')
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object')
     } catch (e) {
       errors.push(`message ${message.id}: invalid JSON: ${e instanceof Error ? e.message : e}`)
       pending.push(message.id)

@@ -89,7 +89,13 @@ export function runParseHermes(
   // lies behind it.
   let lastEndedAt = cursor?.lastEndedAt ?? 0
   let lastId = cursor?.lastId ?? ''
-  const openSessionIds: string[] = []
+  // Every open session, also one the query above leaves out because it has
+  // no usage yet: it can get its usage and end behind the cursor like any
+  // other.
+  const openSessionIds = db
+    .prepare('SELECT id FROM sessions WHERE ended_at IS NULL ORDER BY started_at, id')
+    .pluck()
+    .all() as string[]
 
   const toolCallsStmt = db.prepare(
     `SELECT id, session_id, tool_calls, timestamp
@@ -103,7 +109,6 @@ export function runParseHermes(
       lastEndedAt = session.session_ts
       lastId = session.id
     }
-    if (session.ended_at == null) openSessionIds.push(session.id)
 
     const model = session.model ?? 'unknown'
     const ts = Math.round(session.started_at * 1000)
@@ -205,7 +210,7 @@ export function runParseHermes(
 
   // Nothing read and nothing to forget: the stored cursor stands, unless it
   // still has to be given its list of open sessions.
-  const nextCursor: HermesCursor | null = sessions.length > 0 || (cursor?.openSessionIds?.length ?? 0) > 0 || (cursor != null && !from)
+  const nextCursor: HermesCursor | null = sessions.length > 0 || openSessionIds.length > 0 || (cursor?.openSessionIds?.length ?? 0) > 0 || (cursor != null && !from)
     ? { lastEndedAt, lastId, openSessionIds }
     : null
   return { records, toolCalls, nextCursor, errors }

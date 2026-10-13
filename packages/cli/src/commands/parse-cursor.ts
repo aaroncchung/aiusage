@@ -18,6 +18,12 @@ export interface CursorImportOptions {
 
 export interface CursorImportResult {
   records: StatsRecord[]
+  /**
+   * Records of conversations with a bubble that could not be read. Their
+   * totals may be short, so they must not replace a record that is already
+   * stored: the caller stores one only for a conversation that has none.
+   */
+  partialRecords: StatsRecord[]
   toolCalls: ToolCallRecord[]
   nextCursor: CursorCursor | null
   errors: string[]
@@ -107,6 +113,7 @@ export function runParseCursor(
 ): CursorImportResult {
   const { dbPath, device, deviceInstanceId, platform, now, cursor, onProgress } = options
   const records: StatsRecord[] = []
+  const partialRecords: StatsRecord[] = []
   const toolCalls: ToolCallRecord[] = []
   const errors: string[] = []
   let lastCursor: CursorCursor | null = null
@@ -117,7 +124,7 @@ export function runParseCursor(
     .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cursorDiskKV'`)
     .get()
   if (!hasTable) {
-    return { records, toolCalls, nextCursor: lastCursor, errors }
+    return { records, partialRecords, toolCalls, nextCursor: lastCursor, errors }
   }
 
   // Fetch all composerData entries with content.
@@ -158,7 +165,7 @@ export function runParseCursor(
   )
 
   if (composers.length === 0) {
-    return { records, toolCalls, nextCursor: lastCursor, errors }
+    return { records, partialRecords, toolCalls, nextCursor: lastCursor, errors }
   }
 
   // Every conversation is read on every run. A conversation keeps its
@@ -194,10 +201,12 @@ export function runParseCursor(
 
       let totalInputTokens = 0
       let totalOutputTokens = 0
+      let unreadableBubbles = 0
 
       for (const row of bubbleRows) {
         try {
           const bubble: BubbleData = JSON.parse(row.value)
+          if (bubble === null || typeof bubble !== 'object') throw new Error('not an object')
           // Only count assistant (type=2) bubbles with actual token data
           if (bubble.type !== 2) continue
           const tc = bubble.tokenCount
@@ -206,7 +215,11 @@ export function runParseCursor(
           totalOutputTokens += tc.outputTokens ?? 0
         } catch {
           // Skip malformed bubble entries
+          unreadableBubbles += 1
         }
+      }
+      if (unreadableBubbles > 0) {
+        errors.push(`composerId ${composer.composerId}: ${unreadableBubbles} of ${bubbleRows.length} bubbles could not be read`)
       }
 
       // Skip conversations with no token data
@@ -248,11 +261,14 @@ export function runParseCursor(
         platform,
       }
 
-      records.push(record)
+      // Every conversation is read on every run, so a total that is short
+      // because a bubble could not be read would overwrite a complete one.
+      if (unreadableBubbles > 0) partialRecords.push(record)
+      else records.push(record)
     } catch (e) {
       errors.push(`composerId ${composer.composerId}: ${e instanceof Error ? e.message : e}`)
     }
   }
 
-  return { records, toolCalls, nextCursor: lastCursor, errors }
+  return { records, partialRecords, toolCalls, nextCursor: lastCursor, errors }
 }

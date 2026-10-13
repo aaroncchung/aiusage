@@ -216,6 +216,25 @@ function normalizeKiroModel(value: unknown): string {
     .replace(/-\d{8}-v\d+(?:-\d+)?$/i, '')
 }
 
+/**
+ * Store records of an import that reads rows again, each with the tool calls
+ * read for it now. A tool call's id contains its position among the calls of
+ * its record, so a call that appears in front of stored ones (a part that
+ * could not be read before) would shift them to new ids and leave the old
+ * rows behind. All calls of such a record come from the one row it was built
+ * from, so its stored calls are replaced as a whole.
+ */
+function insertRecordsWithToolCalls(db: Database.Database, records: StatsRecord[], toolCalls: ToolCallRecord[]): void {
+  const removeToolCalls = db.prepare('DELETE FROM tool_calls WHERE record_id = ?')
+  db.transaction(() => {
+    for (const record of records) {
+      insertRecord(db, record)
+      removeToolCalls.run(record.id)
+    }
+    for (const tc of toolCalls) insertToolCall(db, tc)
+  })()
+}
+
 type RecordIds = { deviceInstanceId: string; recordId?: RecordIdBuilder }
 
 function codeFuseSnapshotRecordId(ids: RecordIds, sessionId: string): string {
@@ -997,8 +1016,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           exchangeRate,
         })
 
-        for (const record of result.records) insertRecord(db, record)
-        for (const tc of result.toolCalls) insertToolCall(db, tc)
+        insertRecordsWithToolCalls(db, result.records, result.toolCalls)
         if (result.nextCursor) {
           wm.setOpenCodeCursor(result.nextCursor)
           wm.save()
@@ -1032,8 +1050,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           exchangeRate,
         })
 
-        for (const record of result.records) insertRecord(db, record)
-        for (const tc of result.toolCalls) insertToolCall(db, tc)
+        insertRecordsWithToolCalls(db, result.records, result.toolCalls)
         if (result.nextCursor) {
           wm.setHermesCursor(result.nextCursor)
           wm.save()
@@ -1107,12 +1124,16 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
         })
 
         for (const record of result.records) insertRecord(db, record)
+        // A total that may be short never replaces a stored one.
+        const hasRecord = db.prepare('SELECT 1 FROM records WHERE id = ?')
+        const partialRecords = result.partialRecords.filter((record) => !hasRecord.get(record.id))
+        for (const record of partialRecords) insertRecord(db, record)
         for (const tc of result.toolCalls) insertToolCall(db, tc)
         if (result.nextCursor) {
           wm.setCursorCursor(result.nextCursor)
           wm.save()
         }
-        parsedCount += result.records.length
+        parsedCount += result.records.length + partialRecords.length
         toolCallCount += result.toolCalls.length
         errors.push(...result.errors)
         if (!cursorProgressFired) {

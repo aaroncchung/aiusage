@@ -116,7 +116,8 @@ describe('runParseHermes', () => {
     const result = runParseHermes(db, BASE_OPTIONS)
 
     expect(result.records).toHaveLength(0)
-    expect(result.nextCursor).toBeNull()
+    // No record yet, but the session is remembered: it is read once it has usage.
+    expect(result.nextCursor).toEqual({ lastEndedAt: 0, lastId: '', openSessionIds: ['sess_running'] })
   })
 
   it('infers provider from model when billing_provider is null', () => {
