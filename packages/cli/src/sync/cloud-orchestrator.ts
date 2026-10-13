@@ -21,10 +21,12 @@ import {
 } from '../db/synced-records.js'
 import {
   clearRetiredWireIds,
+  DELETED_WHILE_UPLOADING,
   getClaimedOwners,
   getRetiredWireIds,
   nextSyncTick,
   recordNamespaceVerdict,
+  retireDeletedUploads,
   UNKNOWN_NAMESPACE_VERDICT,
   withdrawNamespaceVerdict,
 } from '../db/sync-claims.js'
@@ -316,8 +318,16 @@ export class CloudSyncOrchestrator {
    * version, is acknowledged. A record the cloud cannot store is not sent,
    * and one the server reports as rejected is left unsynced, so neither is
    * taken for synced while the cloud does not have it.
+   *
+   * A record a parse deleted while its batch was in flight has reached the
+   * server with nothing local left to acknowledge, and the delete could not
+   * retire a wire id no target had acknowledged. The parse lists such wire
+   * ids (`DELETED_WHILE_UPLOADING`); the ones a batch has just uploaded are
+   * queued for retraction, which `pushRetiredIds` sends next. Ids listed
+   * before the records are read cannot be in a batch and are dropped first.
    */
   private async push(syncGeneration: number): Promise<{ uploadedCount: number; rejectedCount: number }> {
+    clearRetiredWireIds(this.db, DELETED_WHILE_UPLOADING)
     const unsynced = this.getUploadableRecords(this.target)
     let uploadedCount = 0
     let rejectedCount = 0
@@ -334,6 +344,7 @@ export class CloudSyncOrchestrator {
       const rejected = new Set(result.rejectedIds ?? [])
       const stored = sendable.filter(r => !rejected.has(r.wire.id))
       markRecordVersionsSynced(this.db, stored.map(r => r.local), this.target)
+      retireDeletedUploads(this.db, this.target, stored.map(r => r.wire.id))
       uploadedCount += stored.length
       rejectedCount += sendable.length - stored.length
     }

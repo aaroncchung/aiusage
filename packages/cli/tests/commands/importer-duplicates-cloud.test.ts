@@ -3,7 +3,8 @@ import Database from 'better-sqlite3'
 import { generateRecordId, generateSyncRecordId } from '@aiusage/core'
 import type { StatsRecord, SyncRecord, Tool } from '@aiusage/core'
 import { initializeDatabase } from '../../src/db/index.js'
-import { insertRecord, markRecordsSynced } from '../../src/db/records.js'
+import { getUnsyncedRecords, insertRecord, markRecordsSynced } from '../../src/db/records.js'
+import { DELETED_WHILE_UPLOADING } from '../../src/db/sync-claims.js'
 import {
   collapseImporterDuplicates,
   deleteCursorTranscriptEstimates,
@@ -15,11 +16,18 @@ import {
 /** The cloud store for one device, with the rules of the server's push route. */
 const server = new Map<string, { record: SyncRecord; deleted: boolean }>()
 const tombstonesSent: string[] = []
+/** Runs once while a record push is pending, as a parse in another process would. */
+let whileUploading: (() => void) | null = null
 
 vi.mock('../../src/sync/cloud.js', () => ({
   CloudSyncError: class CloudSyncError extends Error {},
   cloudPull: vi.fn(async () => ({ records: [], tombstones: [], hasMore: false, syncGeneration: 1 })),
-  cloudPush: vi.fn(async (records: SyncRecord[], tombstones: Array<{ record_id: string }>) => {
+  cloudPush: vi.fn(async (records: SyncRecord[], tombstones: Array<{ record_id: string; updatedAt: number }>) => {
+    if (records.length > 0 && whileUploading) {
+      const run = whileUploading
+      whileUploading = null
+      run()
+    }
     for (const record of records) {
       const held = server.get(record.id)
       // A record that exists is replaced only by a newer version.
@@ -28,7 +36,8 @@ vi.mock('../../src/sync/cloud.js', () => ({
     for (const tombstone of tombstones) {
       tombstonesSent.push(tombstone.record_id)
       const held = server.get(tombstone.record_id)
-      if (held) held.deleted = true
+      // A tombstone is a version of its own: only a newer record brings the id back.
+      if (held) server.set(tombstone.record_id, { record: { ...held.record, updatedAt: tombstone.updatedAt }, deleted: true })
     }
     return { inserted: 0, updated: 0, skipped: 0, syncGeneration: 1 }
   }),
@@ -67,6 +76,7 @@ describe('importer duplicates and sync targets', () => {
     initializeDatabase(db)
     server.clear()
     tombstonesSent.length = 0
+    whileUploading = null
     vi.clearAllMocks()
   })
 
@@ -79,7 +89,8 @@ describe('importer duplicates and sync targets', () => {
     return new CloudSyncOrchestrator(db, { deviceInstanceId: DEVICE }).sync()
   }
   const onServer = () => Array.from(server.values()).filter(held => !held.deleted).map(held => held.record)
-  const retired = () => db.prepare(`SELECT target, wire_id FROM sync_retired_wire_ids ORDER BY target, wire_id`).all() as Array<{ target: string; wire_id: string }>
+  /** The retraction queue of the sync targets, without the list of ids deleted while an upload may be pending. */
+  const retired = () => db.prepare(`SELECT target, wire_id FROM sync_retired_wire_ids WHERE target != ? ORDER BY target, wire_id`).all(DELETED_WHILE_UPLOADING) as Array<{ target: string; wire_id: string }>
   const stored = (id: string) => db.prepare(`SELECT input_tokens, updated_at FROM records WHERE id = ?`).get(id) as { input_tokens: number; updated_at: number }
 
   it('retracts the Kiro rows the collapse deletes from the cloud', async () => {
@@ -97,6 +108,34 @@ describe('importer duplicates and sync targets', () => {
     expect(result).toMatchObject({ status: 'ok', uploadedCount: 0, retiredCount: 2 })
     expect(onServer().map(r => r.id).sort()).toEqual(second.map(row => row.id).sort())
     expect(retired()).toEqual([])
+  })
+
+  it('retracts a row that a parse deletes while its first upload is pending', async () => {
+    const first = [oldKiro(0, T0), oldKiro(80, T0)]
+    const second = [oldKiro(0, T0 + 60_000), oldKiro(80, T0 + 60_000)]
+    for (const row of [...first, ...second]) insertRecord(db, row)
+    // Nothing is acknowledged yet when the rows are deleted, and the upload
+    // that was read before the delete still delivers all four.
+    whileUploading = () => { collapseImporterDuplicates(db) }
+
+    const result = await cloudSync()
+    expect(result).toMatchObject({ status: 'ok', uploadedCount: 4, retiredCount: 2 })
+    expect(onServer().map(r => r.id).sort()).toEqual(second.map(row => row.id).sort())
+    expect(retired()).toEqual([])
+
+    // The list of deleted ids does not outlive the sync that could have uploaded them.
+    expect((await cloudSync()).retiredCount).toBe(0)
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM sync_retired_wire_ids`).get()).toEqual({ n: 0 })
+  })
+
+  it('does not retract rows that were deleted before they were ever uploaded', async () => {
+    for (const row of [oldKiro(0, T0), oldKiro(0, T0 + 60_000)]) insertRecord(db, row)
+    expect(collapseImporterDuplicates(db).kiro).toBe(1)
+    expect(retired()).toEqual([])
+
+    const result = await cloudSync()
+    expect(result).toMatchObject({ status: 'ok', uploadedCount: 1, retiredCount: 0 })
+    expect(tombstonesSent).toEqual([])
   })
 
   it('queues a deleted row only for the targets that acknowledged it', () => {
@@ -122,6 +161,41 @@ describe('importer duplicates and sync targets', () => {
 
     expect(deleteCursorTranscriptEstimates(db, ['c1'])).toBe(1)
     expect(retired()).toEqual([{ target: 'cloud', wire_id: estimate.id }])
+  })
+
+  it('still retracts an estimate that was stored again since its last upload', async () => {
+    const estimate = record('cursor', generateRecordId(DEVICE, TRANSCRIPT, 0), TRANSCRIPT, T0)
+    insertRecord(db, estimate)
+    await cloudSync()
+
+    // The transcript grew, and state.vscdb delivered the conversation's token counts in the same parse.
+    expect(replaceSourceSnapshot(db, 'cursor', TRANSCRIPT, { ...estimate, inputTokens: 300, updatedAt: Date.now() }, 'larger')).toBe(true)
+    expect(getUnsyncedRecords(db, 'cloud', DEVICE).map(r => r.id)).toEqual([estimate.id])
+    expect(deleteCursorTranscriptEstimates(db, ['c1'])).toBe(1)
+    expect(retired()).toEqual([{ target: 'cloud', wire_id: estimate.id }])
+
+    await cloudSync()
+    expect(onServer()).toEqual([])
+  })
+
+  it('does not retract a CodeBuddy wire id when the row deleted is the one stored under the new id', async () => {
+    // The new id of a conversation is also the wire id of all its snapshots.
+    const stable = record('codebuddy', generateRecordId(DEVICE, CONVERSATION, 0), CONVERSATION, T0, { inputTokens: 1000 })
+    insertRecord(db, stable)
+    await cloudSync()
+    expect(onServer().map(r => r.id)).toEqual([stable.id])
+
+    // An older CLI then imported another turn under its time-based id and
+    // rewrote watermark.json without the repair version, so the repair runs again.
+    const later = oldConversation(T0 + 60_000, 2500, T0 + 60_000)
+    insertRecord(db, later)
+    expect(collapseImporterDuplicates(db).codebuddy).toBe(1)
+    expect(db.prepare(`SELECT id FROM records`).all()).toEqual([{ id: later.id }])
+    expect(retired()).toEqual([])
+
+    await cloudSync()
+    expect(tombstonesSent).toEqual([])
+    expect(onServer().map(r => [r.id, r.inputTokens])).toEqual([[stable.id, 2500]])
   })
 
   it('publishes the CodeBuddy snapshot the collapse keeps as the newest version of its wire id', async () => {

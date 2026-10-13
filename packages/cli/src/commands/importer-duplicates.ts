@@ -2,7 +2,8 @@ import type Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
 import { generateRecordId, type StatsRecord, type Tool } from '@aiusage/core'
 import { getRecordById, getRecordsBySourceFile, insertRecord, LOCAL_RECORDS_WHERE } from '../db/records.js'
-import { mapStatsRecordToSyncRecord } from '../sync/mapper.js'
+import { DELETED_WHILE_UPLOADING } from '../db/sync-claims.js'
+import { mapStatsRecordToSyncRecord, usesGeneratedWireId } from '../sync/mapper.js'
 import { CURRENT_IMPORTER_DEDUP_VERSION, type WatermarkManager } from '../watermark.js'
 
 /**
@@ -60,7 +61,10 @@ function wireId(record: StatsRecord): string {
  *    (GitHub, S3) publishes this device's namespace as a snapshot of its
  *    local records, so the copy is gone with the next sync anyway and the
  *    queue entry is cleared unused. Nothing is queued for a target that never
- *    acknowledged the row.
+ *    acknowledged the row. A sync may be uploading the row at this moment,
+ *    read before the delete and not acknowledged yet, so the wire id is also
+ *    listed under `DELETED_WHILE_UPLOADING` for the cloud target to retire
+ *    if it finds it has just uploaded it.
  *  - One is left (CodeBuddy IDE snapshots of one conversation share a wire
  *    id): retiring the id would delete the row that stands for it now, so
  *    nothing is queued. The remaining row is the correction of the deleted
@@ -83,12 +87,13 @@ export function deleteLocalRecords(db: Database.Database, ids: Iterable<string>)
     }
     for (const { record, targets } of deleted) {
       const published = wireId(record)
-      // A wire id that is the row's own id went with the row; any other is
-      // derived from the source, so only rows of the source can share it.
-      const heirs = published === record.id ? [] : getRecordsBySourceFile(db, record.sourceFile)
+      // A wire id taken from the row's own id went with the row. A generated
+      // one is derived from the source (and can equal the id of one of its
+      // rows), so the rows of the source are the ones that can share it.
+      const heirs = !usesGeneratedWireId(record.tool) ? [] : getRecordsBySourceFile(db, record.sourceFile)
         .filter(other => other.origin === 'local' && wireId(other) === published)
       if (heirs.length === 0) {
-        for (const target of targets) retire.run(target, published)
+        for (const target of [...targets, DELETED_WHILE_UPLOADING]) retire.run(target, published)
         continue
       }
       for (const heir of heirs) advance.run(Math.max(Date.now(), record.updatedAt + 1), heir.id, record.updatedAt)
@@ -102,9 +107,22 @@ export function deleteLocalRecords(db: Database.Database, ids: Iterable<string>)
  * A wire id still waiting in `sync_retired_wire_ids` is taken off the queue:
  * the cloud target sends the queue after the records, so the retraction would
  * delete the record just stored.
+ *
+ * `insertRecord` replaces a row of the same id, and the row's sync state goes
+ * with the replaced row. It is put back when it is older than the record, so
+ * the record still counts as unsynced, and `deleteLocalRecords` still knows
+ * which targets hold the row if it is deleted before the next sync.
  */
 function storeRecords(db: Database.Database, records: StatsRecord[]): void {
-  for (const record of records) insertRecord(db, record)
+  const acknowledged = db.prepare(`SELECT target, synced_at FROM sync_record_state WHERE record_id = ?`)
+  const restore = db.prepare(`INSERT OR IGNORE INTO sync_record_state (record_id, target, synced_at) VALUES (?, ?, ?)`)
+  for (const record of records) {
+    const state = acknowledged.all(record.id) as Array<{ target: string; synced_at: number }>
+    insertRecord(db, record)
+    for (const { target, synced_at } of state) {
+      if (synced_at < record.updatedAt) restore.run(record.id, target, synced_at)
+    }
+  }
   if (records.length === 0) return
   const targets = db.prepare(`SELECT DISTINCT target FROM sync_retired_wire_ids`).pluck().all() as string[]
   if (targets.length === 0) return
