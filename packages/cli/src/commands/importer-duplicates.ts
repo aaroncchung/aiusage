@@ -1,7 +1,8 @@
 import type Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
 import { generateRecordId, type StatsRecord, type Tool } from '@aiusage/core'
-import { insertRecord, LOCAL_RECORDS_WHERE } from '../db/records.js'
+import { getRecordById, getRecordsBySourceFile, insertRecord, LOCAL_RECORDS_WHERE } from '../db/records.js'
+import { mapStatsRecordToSyncRecord } from '../sync/mapper.js'
 import { CURRENT_IMPORTER_DEDUP_VERSION, type WatermarkManager } from '../watermark.js'
 
 /**
@@ -37,25 +38,80 @@ export function cursorTranscriptComposerId(filePath: string): string {
   return name.endsWith('.jsonl') ? name.slice(0, -'.jsonl'.length) : name
 }
 
+/** The id a local record is published under on every sync target. */
+function wireId(record: StatsRecord): string {
+  return mapStatsRecordToSyncRecord(record).id
+}
+
 /**
  * Delete locally parsed records by id; rows pulled from other devices are
  * never touched. Tool calls and per-target sync state go with the row
  * (`ON DELETE CASCADE`). Returns the number of rows deleted.
  *
- * What a sync target makes of it: a file-based target (GitHub, S3) publishes
- * this device's namespace as a snapshot of its local records, so the row is
- * gone from it after the next sync and peers prune their copy. The cloud
- * target only ever upserts what it is sent and deletes on an explicit
- * retraction (`sync_retired_wire_ids`); none is queued here, so a row that
- * was already uploaded stays on the server.
+ * A deleted row may already be published, under its wire id, on the targets
+ * that acknowledged it (`sync_record_state`). What becomes of that copy
+ * depends on whether a local row is left that travels under the same wire id,
+ * which is looked up once every row of the call is gone:
+ *
+ *  - None is left (Kiro and Cursor rows, whose wire id is their own id): the
+ *    wire id is queued in `sync_retired_wire_ids` for each of those targets,
+ *    before the transaction ends. The cloud target is upsert-only and deletes
+ *    the copy when it is sent the queue as tombstones; a file-based target
+ *    (GitHub, S3) publishes this device's namespace as a snapshot of its
+ *    local records, so the copy is gone with the next sync anyway and the
+ *    queue entry is cleared unused. Nothing is queued for a target that never
+ *    acknowledged the row.
+ *  - One is left (CodeBuddy IDE snapshots of one conversation share a wire
+ *    id): retiring the id would delete the row that stands for it now, so
+ *    nothing is queued. The remaining row is the correction of the deleted
+ *    one, and targets and peers take a payload only when its `updatedAt` is
+ *    greater than the one they hold, so its `updated_at` is moved past the
+ *    deleted row's, which also makes it count as unsynced again.
  */
 export function deleteLocalRecords(db: Database.Database, ids: Iterable<string>): number {
+  const targetsOf = db.prepare(`SELECT target FROM sync_record_state WHERE record_id = ?`).pluck()
   const del = db.prepare(`DELETE FROM records WHERE id = ? AND ${LOCAL_RECORDS_WHERE}`)
+  const retire = db.prepare(`INSERT OR IGNORE INTO sync_retired_wire_ids (target, wire_id) VALUES (?, ?)`)
+  const advance = db.prepare(`UPDATE records SET updated_at = ? WHERE id = ? AND updated_at <= ?`)
   return db.transaction(() => {
-    let deleted = 0
-    for (const id of ids) deleted += del.run(id).changes
-    return deleted
+    const deleted: Array<{ record: StatsRecord; targets: string[] }> = []
+    for (const id of ids) {
+      const record = getRecordById(db, id)
+      if (!record || record.origin !== 'local') continue
+      const targets = targetsOf.all(id) as string[]
+      if (del.run(id).changes > 0) deleted.push({ record, targets })
+    }
+    for (const { record, targets } of deleted) {
+      const published = wireId(record)
+      // A wire id that is the row's own id went with the row; any other is
+      // derived from the source, so only rows of the source can share it.
+      const heirs = published === record.id ? [] : getRecordsBySourceFile(db, record.sourceFile)
+        .filter(other => other.origin === 'local' && wireId(other) === published)
+      if (heirs.length === 0) {
+        for (const target of targets) retire.run(target, published)
+        continue
+      }
+      for (const heir of heirs) advance.run(Math.max(Date.now(), record.updatedAt + 1), heir.id, record.updatedAt)
+    }
+    return deleted.length
   })()
+}
+
+/**
+ * Store records this module may have deleted before under the same wire id.
+ * A wire id still waiting in `sync_retired_wire_ids` is taken off the queue:
+ * the cloud target sends the queue after the records, so the retraction would
+ * delete the record just stored.
+ */
+function storeRecords(db: Database.Database, records: StatsRecord[]): void {
+  for (const record of records) insertRecord(db, record)
+  if (records.length === 0) return
+  const targets = db.prepare(`SELECT DISTINCT target FROM sync_retired_wire_ids`).pluck().all() as string[]
+  if (targets.length === 0) return
+  const unretire = db.prepare(`DELETE FROM sync_retired_wire_ids WHERE target = ? AND wire_id = ?`)
+  for (const record of records) {
+    for (const target of targets) unretire.run(target, wireId(record))
+  }
 }
 
 /**
@@ -71,7 +127,9 @@ export function prefixFingerprint(buffer: Buffer, length: number): string | null
 /**
  * Store `records` as everything this device knows about `sourceFile`: local
  * rows of the same tool and source under any other id are deleted in the same
- * transaction. With no record, the source's rows are simply removed.
+ * transaction. With no record, the source's rows are simply removed. The
+ * records are stored first, so a deleted row whose wire id one of them takes
+ * over is not retracted from the sync targets (see `deleteLocalRecords`).
  */
 export function replaceSourceRecords(db: Database.Database, tool: Tool, sourceFile: string, records: StatsRecord[]): void {
   const keep = new Set(records.map(record => record.id))
@@ -79,8 +137,8 @@ export function replaceSourceRecords(db: Database.Database, tool: Tool, sourceFi
     const existing = db.prepare(
       `SELECT id FROM records WHERE tool = ? AND source_file = ? AND ${LOCAL_RECORDS_WHERE}`,
     ).all(tool, sourceFile) as Array<{ id: string }>
+    storeRecords(db, records)
     deleteLocalRecords(db, existing.map(row => row.id).filter(id => !keep.has(id)))
-    for (const record of records) insertRecord(db, record)
   })()
 }
 
@@ -141,19 +199,26 @@ export function kiroLogLineId(deviceInstanceId: string, filePath: string, lineOf
  * earlier log that happened to sit at the same offset.
  */
 export function replaceKiroLogLines(db: Database.Database, sourceFile: string, records: StatsRecord[]): void {
-  const others = db.prepare(`
-    SELECT id FROM records
-    WHERE tool = 'kiro' AND ${LOCAL_RECORDS_WHERE} AND source_file = ? AND line_offset = ?
-      AND model = ? AND input_tokens = ? AND output_tokens = ? AND id != ?
-  `)
+  if (records.length === 0) return
+  const request = (lineOffset: number, model: string, inputTokens: number, outputTokens: number) =>
+    [lineOffset, model, inputTokens, outputTokens].join('\0')
   db.transaction(() => {
-    for (const record of records) {
-      const rows = others.all(
-        sourceFile, record.lineOffset, record.model, record.inputTokens, record.outputTokens, record.id,
-      ) as Array<{ id: string }>
-      deleteLocalRecords(db, rows.map(row => row.id))
-      insertRecord(db, record)
+    // The source's rows are read once, not once per line.
+    const stored = db.prepare(`
+      SELECT id, line_offset, model, input_tokens, output_tokens FROM records
+      WHERE tool = 'kiro' AND ${LOCAL_RECORDS_WHERE} AND source_file = ?
+    `).all(sourceFile) as Array<{ id: string; line_offset: number; model: string; input_tokens: number; output_tokens: number }>
+    const byRequest = new Map<string, string[]>()
+    for (const row of stored) {
+      const key = request(row.line_offset, row.model, row.input_tokens, row.output_tokens)
+      const ids = byRequest.get(key)
+      if (ids) ids.push(row.id)
+      else byRequest.set(key, [row.id])
     }
+    deleteLocalRecords(db, records.flatMap(record =>
+      (byRequest.get(request(record.lineOffset, record.model, record.inputTokens, record.outputTokens)) ?? [])
+        .filter(id => id !== record.id)))
+    storeRecords(db, records)
   })()
 }
 
@@ -266,7 +331,9 @@ function supersededEstimates(rows: DuplicateRow[]): string[] {
  *    `supersededEstimates`). None is kept when the conversation is counted
  *    from `state.vscdb`.
  *  - CodeBuddy IDE conversations: each row is a cumulative snapshot, so the
- *    latest one is kept.
+ *    latest one is kept. The snapshots of a conversation share one wire id,
+ *    so the kept row is published again as the newest version of it (see
+ *    `deleteLocalRecords`).
  *
  * Only locally parsed rows are considered. Running it again finds nothing
  * more to delete. Returns the rows deleted per tool.

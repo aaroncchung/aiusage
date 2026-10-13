@@ -496,5 +496,36 @@ describe('importer duplicates', () => {
         peerDb.close()
       }
     })
+
+    it('makes a peer take the CodeBuddy snapshot that is kept, also when the deleted one was the newer version', async () => {
+      const backend = new FakeSyncBackend()
+      const target = 'github:me/data'
+      const options = { target, consentVerified: true, knownTargets: [target] }
+      const dir = join(scratch, 'CodeBuddyIDE', 'ws', 'history', 's', 'conv-1')
+      // The latest snapshot was stored first; an import that could only read
+      // an older message then stored an earlier snapshot with a newer version.
+      insertRecord(db, oldConversation(dir, T0 + 60_000, 2500))
+      insertRecord(db, { ...oldConversation(dir, T0, 1000), updatedAt: T0 + 120_000 })
+
+      const peerDb = new Database(':memory:')
+      initializeDatabase(peerDb)
+      try {
+        const own = () => new SyncOrchestrator(db, backend, { ...options, deviceInstanceId: DEVICE }).sync()
+        const peer = () => new SyncOrchestrator(peerDb, backend, { ...options, deviceInstanceId: PEER }).sync()
+        const peerInput = () => peerDb.prepare(`SELECT input_tokens FROM records WHERE tool = 'codebuddy'`).all()
+
+        expect((await own()).status).toBe('ok')
+        expect((await peer()).status).toBe('ok')
+        expect(peerInput()).toEqual([{ input_tokens: 1000 }])
+
+        expect(collapseImporterDuplicates(db).codebuddy).toBe(1)
+        expect((await own()).status).toBe('ok')
+        expect(backend.linesUnder(DEVICE).map(line => line.inputTokens)).toEqual([2500])
+        expect((await peer()).status).toBe('ok')
+        expect(peerInput()).toEqual([{ input_tokens: 2500 }])
+      } finally {
+        peerDb.close()
+      }
+    })
   })
 })
