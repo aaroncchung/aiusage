@@ -206,7 +206,7 @@ export function runParseCursor(
       for (const row of bubbleRows) {
         try {
           const bubble: BubbleData = JSON.parse(row.value)
-          if (bubble === null || typeof bubble !== 'object') throw new Error('not an object')
+          if (bubble === null || typeof bubble !== 'object' || Array.isArray(bubble)) throw new Error('not an object')
           // Only count assistant (type=2) bubbles with actual token data
           if (bubble.type !== 2) continue
           const tc = bubble.tokenCount

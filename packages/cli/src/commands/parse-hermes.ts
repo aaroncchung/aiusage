@@ -50,6 +50,16 @@ export function runParseHermes(
   db: Database.Database,
   options: HermesImportOptions,
 ): HermesImportResult {
+  // One read transaction, so the sessions and the list of open sessions come
+  // from the same state of the database: a session that ends between the
+  // two queries would be read as open and then not be remembered as open.
+  return db.transaction(() => readHermes(db, options))()
+}
+
+function readHermes(
+  db: Database.Database,
+  options: HermesImportOptions,
+): HermesImportResult {
   const { dbPath, device, deviceInstanceId, platform, now, cursor, exchangeRate } = options
   const records: StatsRecord[] = []
   const toolCalls: ToolCallRecord[] = []

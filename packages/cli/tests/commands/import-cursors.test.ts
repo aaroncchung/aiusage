@@ -369,6 +369,9 @@ describe('runParse with both opencode.db and kilo.db (#82)', () => {
     put('bubbleId:fresh:b1', bubble(50))
     put('bubbleId:fresh:b2', 'null')
     const second = await runParse(cache, undefined, options)
+    // Unreadable in another way: valid JSON that is not a bubble.
+    put('bubbleId:conv:b2', '[]')
+    await runParse(cache, undefined, options)
 
     // The stored total stands and stays synced; the conversation without a
     // record gets what could be read. Both are reported.
@@ -532,6 +535,23 @@ describe('Hermes import (#83)', () => {
 
     db.prepare('DELETE FROM sessions WHERE id = ?').run('idle')
     expect(run(db, second.nextCursor).nextCursor).toEqual({ lastEndedAt: 20, lastId: 'done', openSessionIds: [] })
+  })
+
+  it('reads the sessions and the open sessions in one transaction', () => {
+    const db = sourceDb('state.db', HERMES_SCHEMA)
+    put(db, 'open', 100, null, 1000, 100)
+    const prepare = db.prepare.bind(db)
+    const inTransaction: boolean[] = []
+    db.prepare = ((sql: string) => {
+      inTransaction.push(db.inTransaction)
+      return prepare(sql)
+    }) as typeof db.prepare
+
+    run(db, null)
+
+    expect(inTransaction.length).toBeGreaterThan(1)
+    expect(inTransaction).not.toContain(false)
+    expect(db.inTransaction).toBe(false)
   })
 
   it('does not read ended sessions behind the cursor again', () => {
