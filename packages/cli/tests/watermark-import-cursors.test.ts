@@ -66,14 +66,16 @@ describe('WatermarkManager import cursors', () => {
     expect(new WatermarkManager(watermarkPath).getOpenCodeCursor()).toEqual(openCodeCursor)
   })
 
-  it('round-trips the open Hermes sessions and the Cursor conversation fingerprints', () => {
+  it('round-trips the open Hermes sessions and the pending OpenCode and Kilo messages', () => {
     const wm = new WatermarkManager(watermarkPath)
     wm.setHermesCursor({ lastEndedAt: 30, lastId: 'fast', openSessionIds: ['slow'] })
-    wm.setCursorCursor({ lastCreatedAt: 9, lastId: 'new', seen: { old: '2::none:', new: '1::none:' } })
+    wm.setOpenCodeCursor({ ...openCodeCursor, pendingMessageIds: ['oc_1'] })
+    wm.setKiloCursor({ lastMessageCreatedAt: 2000, lastMessageId: 'kilo_2', pendingMessageIds: ['kilo_1'] })
     wm.save()
 
     const reloaded = new WatermarkManager(watermarkPath)
     expect(reloaded.getHermesCursor()).toEqual({ lastEndedAt: 30, lastId: 'fast', openSessionIds: ['slow'] })
-    expect(reloaded.getCursorCursor()).toEqual({ lastCreatedAt: 9, lastId: 'new', seen: { old: '2::none:', new: '1::none:' } })
+    expect(reloaded.getOpenCodeCursor()).toEqual({ ...openCodeCursor, pendingMessageIds: ['oc_1'] })
+    expect(reloaded.getKiloCursor()).toEqual({ lastMessageCreatedAt: 2000, lastMessageId: 'kilo_2', pendingMessageIds: ['kilo_1'] })
   })
 })

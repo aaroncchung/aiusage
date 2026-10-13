@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import Database from 'better-sqlite3'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,12 +7,24 @@ import { spawnSync } from 'node:child_process'
 import { initializeDatabase } from '../../src/db/index.js'
 import { getUnsyncedRecords, markRecordVersionsSynced } from '../../src/db/records.js'
 import { runParse } from '../../src/commands/parse.js'
-import { runParseOpenCode } from '../../src/commands/parse-opencode.js'
+import { runParseOpenCode, MAX_PENDING_MESSAGES } from '../../src/commands/parse-opencode.js'
 import { runParseKilo } from '../../src/commands/parse-kilo.js'
 import { runParseGoose } from '../../src/commands/parse-goose.js'
 import { runParseHermes } from '../../src/commands/parse-hermes.js'
 import { runParseCursor } from '../../src/commands/parse-cursor.js'
 import { runParseTrae } from '../../src/commands/parse-trae.js'
+
+// runParse looks for every tool's data through discovery, which reads the
+// home directory, APPDATA, LOCALAPPDATA, the XDG directories and per-tool
+// overrides such as AIUSAGE_KILOCODE_DB_PATH. Here it finds no log files and
+// only the databases a test names, whatever is installed on the machine and
+// whatever the environment says.
+const discovery = vi.hoisted(() => ({ dbPaths: {} as Record<string, string> }))
+vi.mock('../../src/discovery.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/discovery.js')>(),
+  discoverLogFiles: () => [],
+  getDbPath: (sourceKey: string) => discovery.dbPaths[sourceKey] ?? null,
+}))
 
 // tests/setup-home.ts points the home directory at a temporary directory of
 // this test file, so ~/.aiusage below is never the real one.
@@ -38,6 +50,8 @@ beforeEach(() => {
 afterEach(() => {
   for (const db of open.splice(0)) db.close()
   rmSync(dir, { recursive: true, force: true })
+  discovery.dbPaths = {}
+  vi.unstubAllEnvs()
 })
 
 const MESSAGE_SCHEMA = `
@@ -45,7 +59,7 @@ const MESSAGE_SCHEMA = `
   CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
 `
 
-function assistant(input: number, output: number, completed: number | null = 1): string {
+function assistant(input: number, output: number, completed: number | null = 1, extra: Record<string, unknown> = {}): string {
   return JSON.stringify({
     role: 'assistant',
     modelID: 'gpt-4o',
@@ -53,6 +67,7 @@ function assistant(input: number, output: number, completed: number | null = 1):
     cost: 0,
     tokens: { input, output, reasoning: 0, cache: { read: 0, write: 0 } },
     time: completed === null ? { created: 1 } : { created: 1, completed },
+    ...extra,
   })
 }
 
@@ -72,63 +87,134 @@ describe.each([
 
     const first = run(db, null)
     expect(first.records.map(r => r.inputTokens)).toEqual([1000])
-    expect(first.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 60_000, lastMessageId: 'msg_1' })
+    // The cursor moves on; the unfinished message is kept by id.
+    expect(first.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 30_000, lastMessageId: 'msg_2', pendingMessageIds: ['msg_2'] })
 
     putMessage(db, 'msg_2', NOW - 30_000, assistant(2000, 200))
     const second = run(db, first.nextCursor)
 
     expect(second.records.map(r => [r.inputTokens, r.outputTokens])).toEqual([[2000, 200]])
     expect(second.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 30_000, lastMessageId: 'msg_2' })
-    expect(run(db, second.nextCursor).records).toEqual([])
+    const third = run(db, second.nextCursor)
+    expect(third.records).toEqual([])
+    expect(third.nextCursor).toBeNull()
   })
 
-  it('holds the cursor for a completed message without tokens and for one without a completion time', () => {
+  it('reads a completed message without tokens and one without a completion time again, and nothing else', () => {
     const db = sourceDb('messages.db', MESSAGE_SCHEMA)
     putMessage(db, 'msg_1', NOW - 60_000, assistant(0, 0))
     putMessage(db, 'msg_2', NOW - 50_000, assistant(500, 50))
 
     const first = run(db, null)
     expect(first.records.map(r => r.inputTokens)).toEqual([500])
-    expect(first.nextCursor).toBeNull()
+    expect(first.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 50_000, lastMessageId: 'msg_2', pendingMessageIds: ['msg_1'] })
 
     putMessage(db, 'msg_1', NOW - 60_000, assistant(700, 70, null))
     const second = run(db, first.nextCursor)
-    // Tokens but no completion time: imported with what it has, still not final.
-    expect(second.records.map(r => r.inputTokens)).toEqual([700, 500])
-    expect(second.nextCursor).toBeNull()
+    // Tokens but no completion time: imported with what it has, still not
+    // final. The finished message behind the cursor is not read again.
+    expect(second.records.map(r => r.inputTokens)).toEqual([700])
+    expect(second.nextCursor).toEqual(first.nextCursor)
+
+    putMessage(db, 'msg_1', NOW - 60_000, assistant(900, 90))
+    const third = run(db, second.nextCursor)
+    expect(third.records.map(r => [r.id, r.inputTokens])).toEqual([[second.records[0].id, 900]])
+    expect(third.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 50_000, lastMessageId: 'msg_2' })
   })
 
-  it('keeps importing messages that follow an unfinished one, with stable ids', () => {
+  it('imports a message that completes long after it was created, whatever the clock says', () => {
     const db = sourceDb('messages.db', MESSAGE_SCHEMA)
-    putMessage(db, 'msg_1', NOW - 60_000, assistant(0, 0, null))
+    const day = 24 * 60 * 60 * 1000
+    // Already days old when it is first seen, and still unfinished.
+    putMessage(db, 'msg_1', NOW - 3 * day, assistant(0, 0, null))
     putMessage(db, 'msg_2', NOW - 50_000, assistant(500, 50))
 
     const first = run(db, null)
-    const second = run(db, first.nextCursor)
+    expect(first.records.map(r => r.inputTokens)).toEqual([500])
 
-    expect(second.records.map(r => r.id)).toEqual(first.records.map(r => r.id))
+    // Later runs, with the clock far ahead; the response has not resumed.
+    const second = run(db, first.nextCursor, NOW + 30 * day)
+    expect(second.records).toEqual([])
+
+    putMessage(db, 'msg_1', NOW - 3 * day, assistant(4000, 400))
+    const third = run(db, second.nextCursor, NOW + 60 * day)
+
+    expect(third.records.map(r => [r.inputTokens, r.outputTokens])).toEqual([[4000, 400]])
+    expect(third.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 50_000, lastMessageId: 'msg_2' })
   })
 
-  it('stops waiting for a message that has been unfinished for a day', () => {
+  it('does not come back for a message with a recorded outcome, or for a user message', () => {
     const db = sourceDb('messages.db', MESSAGE_SCHEMA)
-    const dayAgo = NOW - 24 * 60 * 60 * 1000
-    putMessage(db, 'msg_1', dayAgo, assistant(0, 0, null))
-    putMessage(db, 'msg_2', NOW - 50_000, assistant(500, 50))
-
-    const result = run(db, null)
-
-    expect(result.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 50_000, lastMessageId: 'msg_2' })
-  })
-
-  it('moves the cursor over user messages and unreadable rows', () => {
-    const db = sourceDb('messages.db', MESSAGE_SCHEMA)
-    putMessage(db, 'msg_1', NOW - 60_000, JSON.stringify({ role: 'user' }))
-    putMessage(db, 'msg_2', NOW - 50_000, '{not json')
+    putMessage(db, 'msg_1', NOW - 60_000, assistant(0, 0, 1, { error: { name: 'MessageAbortedError' } }))
+    putMessage(db, 'msg_2', NOW - 50_000, assistant(0, 0, 1, { finish: 'stop' }))
+    putMessage(db, 'msg_3', NOW - 40_000, JSON.stringify({ role: 'user' }))
 
     const result = run(db, null)
 
     expect(result.records).toEqual([])
-    expect(result.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 50_000, lastMessageId: 'msg_2' })
+    expect(result.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 40_000, lastMessageId: 'msg_3' })
+  })
+
+  it('reads an unreadable row again until it can be read', () => {
+    const db = sourceDb('messages.db', MESSAGE_SCHEMA)
+    putMessage(db, 'msg_1', NOW - 60_000, '{not json')
+
+    const first = run(db, null)
+    expect(first.records).toEqual([])
+    expect(first.errors).toHaveLength(1)
+    expect(first.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 60_000, lastMessageId: 'msg_1', pendingMessageIds: ['msg_1'] })
+
+    // Unreadable in another way, and a newer message arrives: the row is
+    // not lost and does not stop the import.
+    putMessage(db, 'msg_1', NOW - 60_000, 'null')
+    putMessage(db, 'msg_2', NOW - 50_000, assistant(500, 50))
+    const second = run(db, first.nextCursor)
+    expect(second.records.map(r => r.inputTokens)).toEqual([500])
+    expect(second.errors).toHaveLength(1)
+    expect(second.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 50_000, lastMessageId: 'msg_2', pendingMessageIds: ['msg_1'] })
+
+    putMessage(db, 'msg_1', NOW - 60_000, assistant(300, 30))
+    const third = run(db, second.nextCursor)
+    expect(third.records.map(r => r.inputTokens)).toEqual([300])
+    expect(third.errors).toEqual([])
+    expect(third.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 50_000, lastMessageId: 'msg_2' })
+  })
+
+  it('forgets a pending message that is gone, on a run that reads nothing', () => {
+    const db = sourceDb('messages.db', MESSAGE_SCHEMA)
+    putMessage(db, 'msg_1', NOW - 60_000, assistant(1000, 100))
+    putMessage(db, 'msg_2', NOW - 30_000, assistant(0, 0, null))
+    const first = run(db, null)
+
+    db.prepare('DELETE FROM message WHERE id = ?').run('msg_2')
+    const second = run(db, first.nextCursor)
+
+    expect(second.records).toEqual([])
+    expect(second.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 30_000, lastMessageId: 'msg_2' })
+  })
+
+  it('keeps the newest pending messages when there are more than the limit', () => {
+    const db = sourceDb('messages.db', MESSAGE_SCHEMA)
+    const ids = Array.from({ length: MAX_PENDING_MESSAGES + 2 }, (_, i) => `msg_${String(i).padStart(4, '0')}`)
+    db.transaction(() => ids.forEach((id, i) => putMessage(db, id, NOW - 1_000_000 + i, assistant(0, 0, null))))()
+
+    const result = run(db, null)
+
+    expect(result.nextCursor!.pendingMessageIds).toEqual(ids.slice(2))
+    expect(result.nextCursor!.lastMessageId).toBe(ids[ids.length - 1])
+  })
+
+  it('reads messages created at the same time once each', () => {
+    const db = sourceDb('messages.db', MESSAGE_SCHEMA)
+    putMessage(db, 'msg_b', NOW - 60_000, assistant(200, 20))
+    const first = run(db, null)
+
+    // Same creation time as the message the cursor stands on.
+    putMessage(db, 'msg_c', NOW - 60_000, assistant(300, 30))
+    const second = run(db, first.nextCursor)
+
+    expect(second.records.map(r => r.inputTokens)).toEqual([300])
+    expect(second.nextCursor).toEqual({ lastMessageCreatedAt: NOW - 60_000, lastMessageId: 'msg_c' })
   })
 })
 
@@ -155,7 +241,7 @@ describe('runParse with both opencode.db and kilo.db (#82)', () => {
     putMessage(opencode, 'oc_2', 3000, assistant(300, 30))
     putMessage(kilo, 'kilo_1', 2000, assistant(200, 20))
     const openCodeDbPath = join(dir, 'opencode.db')
-    writeFileSync(join(aiusageDir, 'config.json'), JSON.stringify({ sources: { 'kilocode-db': join(dir, 'kilo.db') } }))
+    discovery.dbPaths = { 'kilocode-db': join(dir, 'kilo.db') }
 
     await runParse(cache, undefined, { openCodeDbPath })
     expect(count('opencode')).toBe(2)
@@ -172,10 +258,48 @@ describe('runParse with both opencode.db and kilo.db (#82)', () => {
     expect(count('kilocode')).toBe(2)
   })
 
+  it('reads only the databases it is given, whatever the environment points at', async () => {
+    const kilo = sourceDb('kilo.db', MESSAGE_SCHEMA)
+    putMessage(kilo, 'kilo_1', 2000, assistant(200, 20))
+    const other = sourceDb('other-kilo.db', MESSAGE_SCHEMA)
+    putMessage(other, 'other_1', 1000, assistant(100, 10))
+    putMessage(other, 'other_2', 2000, assistant(200, 20))
+    discovery.dbPaths = { 'kilocode-db': join(dir, 'kilo.db') }
+    writeFileSync(join(aiusageDir, 'config.json'), JSON.stringify({ sources: { 'kilocode-db': join(dir, 'kilo.db') } }))
+    vi.stubEnv('AIUSAGE_KILOCODE_DB_PATH', join(dir, 'other-kilo.db'))
+
+    await runParse(cache)
+
+    expect(cache.prepare('SELECT tool, COUNT(*) AS n FROM records GROUP BY tool').all()).toEqual([{ tool: 'kilocode', n: 1 }])
+  })
+
+  it.each([
+    ['opencode', 'opencode.db'],
+    ['kilocode', 'kilo.db'],
+  ])('keeps the pending messages of %s between runs', async (tool, name) => {
+    const source = sourceDb(name, MESSAGE_SCHEMA)
+    putMessage(source, 'msg_1', 1000, assistant(0, 0, null))
+    putMessage(source, 'msg_2', 2000, '{not json')
+    putMessage(source, 'msg_3', 3000, assistant(300, 30))
+    const options = tool === 'opencode' ? { openCodeDbPath: join(dir, name) } : {}
+    if (tool === 'kilocode') discovery.dbPaths = { 'kilocode-db': join(dir, name) }
+    const tokens = () => cache.prepare('SELECT input_tokens FROM records WHERE tool = ? ORDER BY input_tokens').pluck().all(tool)
+
+    await runParse(cache, undefined, options)
+    expect(tokens()).toEqual([300])
+
+    // Both finish after the cursor has moved past them.
+    putMessage(source, 'msg_1', 1000, assistant(100, 10))
+    putMessage(source, 'msg_2', 2000, assistant(200, 20))
+    await runParse(cache, undefined, options)
+
+    expect(tokens()).toEqual([100, 200, 300])
+  })
+
   it('reads a Goose session again on every run and leaves an unchanged one synced', async () => {
     const goose = sourceDb('sessions.db', GOOSE_SCHEMA)
     putGooseSession(goose, 's1', '2026-07-06 08:00:00', 1000, 100)
-    writeFileSync(join(aiusageDir, 'config.json'), JSON.stringify({ sources: { goose: join(dir, 'sessions.db') } }))
+    discovery.dbPaths = { goose: join(dir, 'sessions.db') }
     const target = 'cloud:https://sync.example.test'
     const row = () => cache.prepare("SELECT id, input_tokens, output_tokens, updated_at FROM records WHERE tool = 'goose'").get() as { id: string; input_tokens: number; output_tokens: number; updated_at: number }
 
@@ -305,15 +429,30 @@ describe('Hermes import (#83)', () => {
     expect(second.nextCursor).toBeNull()
   })
 
-  it('accepts a cursor written before open sessions were tracked', () => {
+  it('reads every session once more for a cursor written before open sessions were tracked', () => {
     const db = sourceDb('state.db', HERMES_SCHEMA)
     put(db, 'done', 10, 20, 1000, 100)
-    put(db, 'open', 5, null, 300, 30)
+    put(db, 'open', 7, null, 300, 30)
+    // Imported while open by the earlier release, which then moved its
+    // cursor to 'done'; it ended before the upgrade, behind that cursor.
+    put(db, 'late', 5, 15, 9000, 900)
 
     const result = run(db, { lastEndedAt: 20, lastId: 'done' })
 
-    expect(result.records.map(r => r.sessionId)).toEqual(['open'])
+    expect(result.records.map(r => [r.sessionId, r.inputTokens])).toEqual([['open', 300], ['late', 9000], ['done', 1000]])
     expect(result.nextCursor).toEqual({ lastEndedAt: 20, lastId: 'done', openSessionIds: ['open'] })
+    // Once: the cursor now tracks open sessions.
+    expect(run(db, result.nextCursor).records.map(r => r.sessionId)).toEqual(['open'])
+  })
+
+  it('gives a cursor written before open sessions were tracked its list even when there is nothing to read', () => {
+    const db = sourceDb('state.db', HERMES_SCHEMA)
+
+    const result = run(db, { lastEndedAt: 20, lastId: 'done' })
+
+    expect(result.records).toEqual([])
+    expect(result.nextCursor).toEqual({ lastEndedAt: 20, lastId: 'done', openSessionIds: [] })
+    expect(run(db, result.nextCursor).nextCursor).toBeNull()
   })
 })
 
@@ -329,8 +468,10 @@ describe('Cursor import (#83)', () => {
     db.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run(`bubbleId:${composerId}:${bubbleId}`, JSON.stringify({
       type: 2, tokenCount: { inputTokens: input, outputTokens: output },
     }))
+  const putBubbleWithoutTokens = (db: Database.Database, composerId: string, bubbleId: string) =>
+    db.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run(`bubbleId:${composerId}:${bubbleId}`, JSON.stringify({ type: 2 }))
 
-  it('reads a conversation again when it gains a bubble', () => {
+  it('follows a conversation that gains a bubble', () => {
     const db = sourceDb('state.vscdb', CURSOR_SCHEMA)
     putComposer(db, 'old', 1_779_400_000_000)
     putBubble(db, 'old', 'b1', 1000, 100)
@@ -344,25 +485,37 @@ describe('Cursor import (#83)', () => {
     putBubble(db, 'old', 'b2', 2000, 200)
     const second = run(db, first.nextCursor)
 
-    expect(second.records.map(r => [r.id, r.inputTokens, r.outputTokens])).toEqual([[first.records[0].id, 3000, 300]])
-    expect(run(db, second.nextCursor).records).toEqual([])
+    expect(second.records.map(r => [r.id, r.inputTokens, r.outputTokens])).toEqual([
+      [first.records[0].id, 3000, 300],
+      [first.records[1].id, 10, 1],
+    ])
   })
 
-  it('reads a conversation again when Cursor marks it as updated', () => {
+  it('imports token counts that arrive on a bubble it has already seen', () => {
     const db = sourceDb('state.vscdb', CURSOR_SCHEMA)
-    putComposer(db, 'conv', 1_779_400_000_000, { lastUpdatedAt: 1_779_400_000_500, status: 'generating' })
-    putBubble(db, 'conv', 'b1', 1000, 0)
+    putComposer(db, 'waiting', 1_779_400_000_000)
+    putBubbleWithoutTokens(db, 'waiting', 'b1')
+    putComposer(db, 'growing', 1_779_410_000_000)
+    putBubble(db, 'growing', 'b1', 1000, 0)
+
     const first = run(db, null)
+    // Nothing to import yet for the first conversation.
+    expect(first.records.map(r => [r.sessionId, r.inputTokens, r.outputTokens])).toEqual([['growing', 1000, 0]])
 
-    // The bubble's tokens are filled in; the bubble count is the same.
-    putBubble(db, 'conv', 'b1', 1000, 400)
-    expect(run(db, first.nextCursor).records).toEqual([])
-    putComposer(db, 'conv', 1_779_400_000_000, { lastUpdatedAt: 1_779_400_009_000, status: 'completed' })
+    // The same bubbles get their counts. No bubble is added and nothing in
+    // either composerData entry changes.
+    putBubble(db, 'waiting', 'b1', 500, 50)
+    putBubble(db, 'growing', 'b1', 1000, 400)
+    const second = run(db, first.nextCursor)
 
-    expect(run(db, first.nextCursor).records.map(r => r.outputTokens)).toEqual([400])
+    expect(second.records.map(r => [r.sessionId, r.inputTokens, r.outputTokens])).toEqual([
+      ['waiting', 500, 50],
+      ['growing', 1000, 400],
+    ])
+    expect(second.records[1].id).toBe(first.records[0].id)
   })
 
-  it('reads every conversation once more for a cursor written by an earlier release', () => {
+  it('reads every conversation for a cursor written by an earlier release', () => {
     const db = sourceDb('state.vscdb', CURSOR_SCHEMA)
     putComposer(db, 'old', 1_779_400_000_000)
     putBubble(db, 'old', 'b1', 1000, 100)
@@ -373,26 +526,23 @@ describe('Cursor import (#83)', () => {
     const result = run(db, { lastCreatedAt: 1_779_410_000_000, lastId: 'new' })
 
     expect(result.records.map(r => r.inputTokens)).toEqual([3000, 10])
-    expect(result.nextCursor).toMatchObject({ lastCreatedAt: 1_779_410_000_000, lastId: 'new' })
-    expect(Object.keys(result.nextCursor!.seen!).sort()).toEqual(['new', 'old'])
-    expect(run(db, result.nextCursor).records).toEqual([])
+    // The cursor already names the newest conversation: nothing to store.
+    expect(result.nextCursor).toBeNull()
   })
 
-  it('forgets conversations that are gone and remembers ones without token data', () => {
+  it('keeps nothing per conversation in the cursor', () => {
     const db = sourceDb('state.vscdb', CURSOR_SCHEMA)
     putComposer(db, 'gone', 1_779_400_000_000)
     putBubble(db, 'gone', 'b1', 1000, 100)
     putComposer(db, 'empty', 1_779_405_000_000)
     const first = run(db, null)
-    expect(Object.keys(first.nextCursor!.seen!).sort()).toEqual(['empty', 'gone'])
+    expect(first.nextCursor).toEqual({ lastCreatedAt: 1_779_405_000_000, lastId: 'empty' })
 
     db.prepare("DELETE FROM cursorDiskKV WHERE key LIKE '%gone%'").run()
-    putComposer(db, 'next', 1_779_410_000_000)
-    putBubble(db, 'next', 'b1', 10, 1)
     const second = run(db, first.nextCursor)
 
-    expect(second.records.map(r => r.sessionId)).toEqual(['next'])
-    expect(Object.keys(second.nextCursor!.seen!).sort()).toEqual(['empty', 'next'])
+    expect(second.records).toEqual([])
+    expect(second.nextCursor).toBeNull()
   })
 })
 

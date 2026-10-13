@@ -194,7 +194,7 @@ describe('runParseCursor', () => {
     expect(result.records[1].outputTokens).toBe(500)
   })
 
-  it('respects cursor for incremental import', () => {
+  it('reads every conversation again on a later import, with the same ids', () => {
     insertComposer(db, 'conv-old', 1779400000000, { default: { costInCents: 4, amount: 1 } })
     insertBubble(db, 'conv-old', 'b-1', 2, 1000, 100)
 
@@ -204,15 +204,15 @@ describe('runParseCursor', () => {
     // First import: get both
     const result1 = runParseCursor(db, BASE_OPTIONS)
     expect(result1.records).toHaveLength(2)
-    expect(result1.nextCursor).toMatchObject({ lastCreatedAt: 1779410000000, lastId: 'conv-new' })
+    expect(result1.nextCursor).toEqual({ lastCreatedAt: 1779410000000, lastId: 'conv-new' })
 
-    // Second import with cursor: get nothing
+    // Second import with cursor: both again, and the cursor stands
     const result2 = runParseCursor(db, { ...BASE_OPTIONS, cursor: result1.nextCursor })
-    expect(result2.records).toHaveLength(0)
+    expect(result2.records.map(r => r.id)).toEqual(result1.records.map(r => r.id))
     expect(result2.nextCursor).toBeNull()
   })
 
-  it('only returns new conversations since cursor', () => {
+  it('does not skip conversations the cursor has passed', () => {
     insertComposer(db, 'conv-1', 1779400000000, {})
     insertBubble(db, 'conv-1', 'b-1', 2, 1000, 100)
 
@@ -222,16 +222,14 @@ describe('runParseCursor', () => {
     insertComposer(db, 'conv-3', 1779420000000, {})
     insertBubble(db, 'conv-3', 'b-3', 2, 3000, 300)
 
-    // Use the cursor of a run that saw only conv-1
-    const seenFirst = db.prepare(`SELECT key, value FROM cursorDiskKV WHERE key LIKE '%conv-2%' OR key LIKE '%conv-3%'`).all() as { key: string; value: string }[]
-    db.prepare(`DELETE FROM cursorDiskKV WHERE key LIKE '%conv-2%' OR key LIKE '%conv-3%'`).run()
-    const { nextCursor } = runParseCursor(db, BASE_OPTIONS)
-    for (const row of seenFirst) db.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run(row.key, row.value)
-    const result = runParseCursor(db, { ...BASE_OPTIONS, cursor: nextCursor })
+    // Use cursor pointing after conv-1
+    const result = runParseCursor(db, {
+      ...BASE_OPTIONS,
+      cursor: { lastCreatedAt: 1779400000000, lastId: 'conv-1' },
+    })
 
-    expect(result.records).toHaveLength(2)
-    expect(result.records[0].sessionId).toBe('conv-2')
-    expect(result.records[1].sessionId).toBe('conv-3')
+    expect(result.records.map(r => r.sessionId)).toEqual(['conv-1', 'conv-2', 'conv-3'])
+    expect(result.nextCursor).toEqual({ lastCreatedAt: 1779420000000, lastId: 'conv-3' })
   })
 
   it('returns nextCursor pointing to last processed conversation', () => {
@@ -240,17 +238,17 @@ describe('runParseCursor', () => {
 
     const result = runParseCursor(db, BASE_OPTIONS)
 
-    expect(result.nextCursor).toMatchObject({ lastCreatedAt: 1779400000000, lastId: 'conv-x' })
+    expect(result.nextCursor).toEqual({ lastCreatedAt: 1779400000000, lastId: 'conv-x' })
   })
 
-  it('advances nextCursor past conversations with no token data (avoids re-scan)', () => {
+  it('names a conversation with no token data in nextCursor', () => {
     insertComposer(db, 'conv-empty', 1779400000000, {})
-    // No bubbles with tokens — still advances cursor to avoid re-scanning
+    // No bubbles with tokens
 
     const result = runParseCursor(db, BASE_OPTIONS)
 
     expect(result.records).toHaveLength(0)
-    expect(result.nextCursor).toMatchObject({ lastCreatedAt: 1779400000000, lastId: 'conv-empty' })
+    expect(result.nextCursor).toEqual({ lastCreatedAt: 1779400000000, lastId: 'conv-empty' })
     expect(runParseCursor(db, { ...BASE_OPTIONS, cursor: result.nextCursor }).nextCursor).toBeNull()
   })
 
@@ -335,19 +333,19 @@ describe('runParseCursor', () => {
     expect(calls.every(([, total]) => total === 3)).toBe(true)
   })
 
-  it('does not report progress when there is nothing new to process', () => {
+  it('reports progress for a conversation that is read again', () => {
     insertComposer(db, 'conv-old', 1779400000000, {})
     insertBubble(db, 'conv-old', 'b-1', 2, 1000, 100)
 
     const calls: [number, number, number][] = []
     const result = runParseCursor(db, {
       ...BASE_OPTIONS,
-      cursor: runParseCursor(db, BASE_OPTIONS).nextCursor,
+      cursor: { lastCreatedAt: 1779400000000, lastId: 'conv-old' },
       onProgress: (current, total, recordsFound) => calls.push([current, total, recordsFound]),
     })
 
-    expect(result.records).toHaveLength(0)
-    expect(calls).toHaveLength(0)
+    expect(result.records).toHaveLength(1)
+    expect(calls).toEqual([[1, 1, 0]])
   })
 })
 
@@ -396,12 +394,15 @@ describe('runParse with cursor', () => {
     expect(result.errors).toHaveLength(0)
   })
 
-  it('runParse persists cursor so second call imports nothing new', async () => {
+  it('runParse reads the conversation again on a second call without adding a record', async () => {
     const result1 = await runParse(cacheDb, 'cursor', { cursorDbPath })
     expect(result1.parsedCount).toBe(1)
+    const rows = () => cacheDb.prepare("SELECT id, input_tokens, updated_at FROM records WHERE tool = 'cursor'").all()
+    const first = rows()
 
     const result2 = await runParse(cacheDb, 'cursor', { cursorDbPath })
-    expect(result2.parsedCount).toBe(0)
+    expect(result2.parsedCount).toBe(1)
     expect(result2.errors).toHaveLength(0)
+    expect(rows()).toEqual(first)
   })
 })

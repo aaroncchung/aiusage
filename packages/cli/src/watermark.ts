@@ -63,7 +63,8 @@ export interface HermesCursor {
   /**
    * Sessions that had no ended_at when they were last read. They are read
    * again on the next run whatever the cursor says, so the usage a session
-   * has when it ends is not missed.
+   * has when it ends is not missed. A cursor without the list was written
+   * before open sessions were tracked, and every session is read once more.
    */
   openSessionIds?: string[]
 }
@@ -71,6 +72,12 @@ export interface HermesCursor {
 export interface OpenCodeCursor {
   lastMessageCreatedAt: number
   lastMessageId: string
+  /**
+   * Messages behind the cursor that are read again on the next run: assistant
+   * messages whose usage was not final when they were last read, and rows
+   * that could not be read. The list is capped; see `MAX_PENDING_MESSAGES`.
+   */
+  pendingMessageIds?: string[]
 }
 
 export interface QoderCursor {
@@ -81,14 +88,6 @@ export interface QoderCursor {
 export interface CursorCursor {
   lastCreatedAt: number  // Unix timestamp in milliseconds (composerData.createdAt)
   lastId: string         // composerId
-  /**
-   * What each conversation looked like when it was last read (composerId to
-   * a fingerprint of its bubble count and update markers). A conversation is
-   * read again when its fingerprint changes. A cursor without this map was
-   * written by a release that skipped conversations by creation time, and
-   * every conversation is read once more.
-   */
-  seen?: Record<string, string>
 }
 
 export interface TimestampIdCursor {

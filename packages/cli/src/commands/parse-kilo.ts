@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3'
 import type { StatsRecord } from '@aiusage/core'
 import { calculateCost, inferProvider, recordIdFor, type RecordIdBuilder } from '@aiusage/core'
 import type { OpenCodeCursor } from '../watermark.js'
-import { isUnfinishedAssistantMessage } from './parse-opencode.js'
+import { isUnfinishedAssistantMessage, nextMessageCursor } from './parse-opencode.js'
 
 export interface KiloImportOptions {
   dbPath: string
@@ -65,39 +65,36 @@ export function runParseKilo(
   const { dbPath, device, deviceInstanceId, platform, now, cursor, exchangeRate } = options
   const records: StatsRecord[] = []
   const errors: string[] = []
-  let lastCursor: OpenCodeCursor | null = null
 
+  // As in the OpenCode import: past the cursor, plus the messages behind it
+  // that were unfinished or unreadable when they were last read.
   const messages = db.prepare(
     `SELECT id, session_id, time_created, data
      FROM message
      WHERE time_created > ? OR (time_created = ? AND id > ?)
+        OR id IN (SELECT value FROM json_each(?))
      ORDER BY time_created, id`,
   ).all(
     cursor?.lastMessageCreatedAt ?? 0,
     cursor?.lastMessageCreatedAt ?? 0,
     cursor?.lastMessageId ?? '',
+    JSON.stringify(cursor?.pendingMessageIds ?? []),
   ) as KiloMessageRow[]
 
-  // As in the OpenCode import: the cursor stops in front of the first
-  // message whose usage may still change.
-  let cursorHeld = false
-  const advanceCursor = (message: KiloMessageRow): void => {
-    if (cursorHeld) return
-    lastCursor = { lastMessageCreatedAt: message.time_created, lastMessageId: message.id }
-  }
+  const pending: string[] = []
 
   for (const message of messages) {
     let parsed: KiloMessageData
     try {
       parsed = JSON.parse(message.data) as KiloMessageData
+      if (parsed === null || typeof parsed !== 'object') throw new Error('not an object')
     } catch (e) {
       errors.push(`message ${message.id}: invalid JSON: ${e instanceof Error ? e.message : e}`)
-      advanceCursor(message)
+      pending.push(message.id)
       continue
     }
 
-    if (isUnfinishedAssistantMessage(parsed, message.time_created, now)) cursorHeld = true
-    advanceCursor(message)
+    if (isUnfinishedAssistantMessage(parsed)) pending.push(message.id)
 
     if (parsed.role !== 'assistant' || !parsed.tokens) continue
 
@@ -147,5 +144,5 @@ export function runParseKilo(
     })
   }
 
-  return { records, nextCursor: lastCursor, errors }
+  return { records, nextCursor: nextMessageCursor(cursor, messages, pending), errors }
 }

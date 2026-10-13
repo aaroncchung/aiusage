@@ -59,6 +59,11 @@ export function runParseHermes(
   // at a time the cursor has already passed (another session ended later),
   // so the cursor alone would leave it at whatever it held when first seen.
   const reread = JSON.stringify(cursor?.openSessionIds ?? [])
+  // A cursor without that list was written by a release that did not track
+  // open sessions. It may have passed a session that was imported while open
+  // and has ended since, and nothing says which: every session is read once
+  // more. Records keep their ids, so that updates them in place.
+  const from = cursor?.openSessionIds ? cursor : null
 
   const sessions = db
     .prepare(
@@ -74,9 +79,9 @@ export function runParseHermes(
        ORDER BY COALESCE(ended_at, started_at), id`,
     )
     .all(
-      cursor?.lastEndedAt ?? 0,
-      cursor?.lastEndedAt ?? 0,
-      cursor?.lastId ?? '',
+      from?.lastEndedAt ?? 0,
+      from?.lastEndedAt ?? 0,
+      from?.lastId ?? '',
       reread,
     ) as SessionRow[]
 
@@ -198,8 +203,9 @@ export function runParseHermes(
     }
   }
 
-  // Nothing read and nothing to forget: the stored cursor stands.
-  const nextCursor: HermesCursor | null = sessions.length > 0 || (cursor?.openSessionIds?.length ?? 0) > 0
+  // Nothing read and nothing to forget: the stored cursor stands, unless it
+  // still has to be given its list of open sessions.
+  const nextCursor: HermesCursor | null = sessions.length > 0 || (cursor?.openSessionIds?.length ?? 0) > 0 || (cursor != null && !from)
     ? { lastEndedAt, lastId, openSessionIds }
     : null
   return { records, toolCalls, nextCursor, errors }
