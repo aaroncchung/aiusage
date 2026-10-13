@@ -195,6 +195,21 @@ describe('runParse with a Kiro token log (tokens_generated.jsonl)', () => {
     expect(totals().n).toBe(5)
   })
 
+  it('reads a log from the start again when it was replaced by a shorter one with the same file time', async () => {
+    write(request() + request({ promptTokens: 200 }))
+    await runParse(db, 'kiro')
+
+    // A restored copy: other content, shorter, and the time of the file it replaces.
+    writeFileSync(logPath, request({ promptTokens: 300 }))
+    utimesSync(logPath, clock, clock)
+    const result = await runParse(db, 'kiro')
+    expect(result.parsedCount).toBe(1)
+    expect(rows().map(r => r.input_tokens).sort((a, b) => a - b)).toEqual([100, 200, 300])
+
+    const again = await runParse(db, 'kiro')
+    expect(again.parsedCount).toBe(0)
+  })
+
   it('does not read a log again whose time changed but whose content did not', async () => {
     write(request() + request())
     await runParse(db, 'kiro')

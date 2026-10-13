@@ -589,8 +589,10 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
         // watermark's offset would hide every later message. Those files are
         // re-read in full instead and deduplicated by record id.
         // A Kiro token log that changed without growing was replaced; its
-        // branch below notices and reads it from the start.
-        const kiroLogChanged = tool === 'kiro' && filePath.endsWith('.jsonl') && !!entry && entry.mtime !== stat.mtimeMs
+        // branch below notices and reads it from the start. A shorter file
+        // is a replacement whatever its time says (a restored copy keeps it).
+        const kiroLogChanged = tool === 'kiro' && filePath.endsWith('.jsonl') && !!entry
+          && (entry.mtime !== stat.mtimeMs || stat.size < entry.size)
         const skipUnchangedFile = !(tool === 'kelivo' && isKelivoDatabaseFile(filePath)) && !kiroLogChanged
         if (skipUnchangedFile && offset >= stat.size) {
           onProgress({ phase: 'Parsing logs', tool, current: toolIndex, total: toolTotal, records: parsedCount, toolCalls: toolCallCount })
