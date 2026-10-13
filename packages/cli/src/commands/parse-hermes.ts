@@ -18,6 +18,12 @@ export interface HermesImportOptions {
 export interface HermesImportResult {
   records: StatsRecord[]
   toolCalls: ToolCallRecord[]
+  /**
+   * Ids of the records in `records` that had a `tool_calls` payload which
+   * could not be read, so `toolCalls` may be short of calls for them. Their
+   * sessions are kept for another read.
+   */
+  incompleteToolCallRecordIds: string[]
   nextCursor: HermesCursor | null
   errors: string[]
 }
@@ -63,9 +69,12 @@ function readHermes(
   const { dbPath, device, deviceInstanceId, platform, now, cursor, exchangeRate } = options
   const records: StatsRecord[] = []
   const toolCalls: ToolCallRecord[] = []
+  const incompleteToolCallRecordIds: string[] = []
+  // Sessions with a tool_calls payload that could not be read on this run.
+  const unreadSessionIds: string[] = []
   const errors: string[] = []
-  // Past the cursor, plus every session that is open now or was open when
-  // it was last read. A session's totals grow until it ends, and it can end
+  // Past the cursor, plus every session that is open now, or that was open
+  // or could not be read in full when it was last read. A session's totals grow until it ends, and it can end
   // at a time the cursor has already passed (another session ended later),
   // so the cursor alone would leave it at whatever it held when first seen.
   const reread = JSON.stringify(cursor?.openSessionIds ?? [])
@@ -190,21 +199,24 @@ function readHermes(
     // Extract tool calls from messages
     const messages = toolCallsStmt.all(session.id) as MessageRow[]
     let callIndex = 0
+    let unreadablePayloads = 0
     for (const message of messages) {
-      let toolCallList: Array<{ function?: { name?: string } }>
+      let toolCallList: Array<{ function?: { name?: string } } | null>
       try {
         const parsed = JSON.parse(message.tool_calls!)
         if (!Array.isArray(parsed)) {
           errors.push(`session ${session.id} message ${message.id}: tool_calls payload is not an array`)
+          unreadablePayloads++
           continue
         }
-        toolCallList = parsed as Array<{ function?: { name?: string } }>
+        toolCallList = parsed as Array<{ function?: { name?: string } } | null>
       } catch (e) {
         errors.push(`session ${session.id} message ${message.id}: invalid tool_calls JSON: ${e instanceof Error ? e.message : e}`)
+        unreadablePayloads++
         continue
       }
       for (const tc of toolCallList) {
-        const name = tc.function?.name
+        const name = tc?.function?.name
         if (!name) continue
         toolCalls.push({
           id: generateToolCallId(recordId, name, Math.round(message.timestamp * 1000), callIndex),
@@ -216,12 +228,21 @@ function readHermes(
         callIndex++
       }
     }
+
+    // The calls read for this record may be short of some. The caller leaves
+    // the calls it has stored alone, and the session is read again like an
+    // open one: it may have ended, and would not be visited again otherwise.
+    if (unreadablePayloads > 0) {
+      incompleteToolCallRecordIds.push(recordId)
+      if (!openSessionIds.includes(session.id)) unreadSessionIds.push(session.id)
+    }
   }
 
+  const rereadSessionIds = [...openSessionIds, ...unreadSessionIds]
   // Nothing read and nothing to forget: the stored cursor stands, unless it
   // still has to be given its list of open sessions.
-  const nextCursor: HermesCursor | null = sessions.length > 0 || openSessionIds.length > 0 || (cursor?.openSessionIds?.length ?? 0) > 0 || (cursor != null && !from)
-    ? { lastEndedAt, lastId, openSessionIds }
+  const nextCursor: HermesCursor | null = sessions.length > 0 || rereadSessionIds.length > 0 || (cursor?.openSessionIds?.length ?? 0) > 0 || (cursor != null && !from)
+    ? { lastEndedAt, lastId, openSessionIds: rereadSessionIds }
     : null
-  return { records, toolCalls, nextCursor, errors }
+  return { records, toolCalls, incompleteToolCallRecordIds, nextCursor, errors }
 }

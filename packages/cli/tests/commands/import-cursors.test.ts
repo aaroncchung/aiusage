@@ -343,6 +343,92 @@ describe('runParse with both opencode.db and kilo.db (#82)', () => {
     expect(calls()).toEqual([{ name: 'write', call_index: 0 }, { name: 'read', call_index: 1 }])
   })
 
+  it('keeps the stored tool calls of an OpenCode message whose part cannot be read, and reads it again', async () => {
+    const opencode = sourceDb('opencode.db', MESSAGE_SCHEMA)
+    putMessage(opencode, 'msg_1', 1000, assistant(100, 10, null))
+    const putPart = (id: string, timeCreated: number, data: string) =>
+      opencode.prepare('INSERT OR REPLACE INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)').run(id, 'msg_1', 'sess', timeCreated, data)
+    putPart('part_1', 1001, JSON.stringify({ type: 'tool', tool: 'read' }))
+    putPart('part_2', 1002, JSON.stringify({ type: 'tool', tool: 'write' }))
+    const options = { openCodeDbPath: join(dir, 'opencode.db') }
+    const calls = () => cache.prepare('SELECT name, call_index FROM tool_calls ORDER BY call_index').all()
+    const stored = [{ name: 'read', call_index: 0 }, { name: 'write', call_index: 1 }]
+
+    await runParse(cache, undefined, options)
+    expect(calls()).toEqual(stored)
+
+    // The message becomes final on the very read on which a part cannot be
+    // read: the calls read now are short of one.
+    putMessage(opencode, 'msg_1', 1000, assistant(900, 90))
+    putPart('part_1', 1001, '{not json')
+    const result = await runParse(cache, undefined, options)
+
+    expect(result.errors.some(e => e.includes('part_1'))).toBe(true)
+    expect(cache.prepare('SELECT input_tokens FROM records').pluck().all()).toEqual([900])
+    expect(calls()).toEqual(stored)
+
+    // Unreadable in other ways: still nothing is taken away or added.
+    for (const data of ['null', '[]']) {
+      putPart('part_1', 1001, data)
+      await runParse(cache, undefined, options)
+      expect(calls()).toEqual(stored)
+    }
+
+    // The message is final, and it is still read again: once the part can
+    // be read, the calls are replaced by what the message holds now.
+    putPart('part_1', 1001, JSON.stringify({ type: 'tool', tool: 'grep' }))
+    await runParse(cache, undefined, options)
+    expect(calls()).toEqual([{ name: 'grep', call_index: 0 }, { name: 'write', call_index: 1 }])
+
+    // Read in full: it is not read again.
+    putPart('part_3', 1003, JSON.stringify({ type: 'tool', tool: 'bash' }))
+    await runParse(cache, undefined, options)
+    expect(calls()).toEqual([{ name: 'grep', call_index: 0 }, { name: 'write', call_index: 1 }])
+  })
+
+  it('keeps the stored tool calls of a Hermes session whose tool calls cannot be read, and reads it again', async () => {
+    const hermes = sourceDb('state.db', HERMES_SCHEMA)
+    const putSession = (id: string, startedAt: number, endedAt: number | null, input: number) =>
+      hermes.prepare('INSERT OR REPLACE INTO sessions (id, model, started_at, ended_at, input_tokens, output_tokens) VALUES (?, ?, ?, ?, ?, ?)').run(id, 'gpt-4o', startedAt, endedAt, input, 100)
+    const putCalls = (id: number, toolCalls: string) =>
+      hermes.prepare('INSERT OR REPLACE INTO messages (id, session_id, role, tool_calls, timestamp) VALUES (?, ?, ?, ?, ?)').run(id, 'slow', 'assistant', toolCalls, 10 + id)
+    putSession('slow', 10, null, 1000)
+    putSession('fast', 20, 30, 10)
+    putCalls(1, JSON.stringify([{ function: { name: 'read' } }]))
+    putCalls(2, JSON.stringify([{ function: { name: 'write' } }]))
+    const options = { hermesDbPath: join(dir, 'state.db') }
+    const calls = () => cache.prepare('SELECT name, call_index FROM tool_calls ORDER BY call_index').all()
+    const stored = [{ name: 'read', call_index: 0 }, { name: 'write', call_index: 1 }]
+
+    await runParse(cache, undefined, options)
+    expect(calls()).toEqual(stored)
+
+    // The session ends, behind the cursor, on the very read on which one of
+    // its payloads cannot be read.
+    putSession('slow', 10, 25, 9000)
+    putCalls(1, '{not json')
+    const result = await runParse(cache, undefined, options)
+
+    expect(result.errors.some(e => e.includes('session slow message 1'))).toBe(true)
+    expect(cache.prepare("SELECT input_tokens FROM records WHERE session_id = 'slow'").pluck().all()).toEqual([9000])
+    expect(calls()).toEqual(stored)
+
+    // Not an array: unreadable in another way.
+    putCalls(1, '{}')
+    await runParse(cache, undefined, options)
+    expect(calls()).toEqual(stored)
+
+    // The session has ended, and it is still read again.
+    putCalls(1, JSON.stringify([{ function: { name: 'grep' } }, null]))
+    await runParse(cache, undefined, options)
+    expect(calls()).toEqual([{ name: 'grep', call_index: 0 }, { name: 'write', call_index: 1 }])
+
+    // Read in full: it is not read again.
+    putCalls(3, JSON.stringify([{ function: { name: 'bash' } }]))
+    await runParse(cache, undefined, options)
+    expect(calls()).toEqual([{ name: 'grep', call_index: 0 }, { name: 'write', call_index: 1 }])
+  })
+
   it('does not replace a stored Cursor total with one that is short of a bubble', async () => {
     const cursorDb = sourceDb('state.vscdb', CURSOR_SCHEMA)
     const put = (key: string, value: unknown) =>

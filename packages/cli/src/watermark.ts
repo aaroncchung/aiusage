@@ -61,10 +61,13 @@ export interface HermesCursor {
   lastEndedAt: number  // Unix timestamp in seconds (float)
   lastId: string
   /**
-   * Sessions that had no ended_at when they were last read. They are read
-   * again on the next run whatever the cursor says, so the usage a session
-   * has when it ends is not missed. A cursor without the list was written
-   * before open sessions were tracked, and every session is read once more.
+   * Sessions that had no ended_at when they were last read, and sessions with
+   * a tool_calls payload that could not be read. They are read again on the
+   * next run whatever the cursor says, so the usage a session has when it
+   * ends, and the calls of a payload once it can be read, are not missed. A
+   * session whose payload stays unreadable stays in the list for as long as
+   * it exists. A cursor without the list was written before open sessions
+   * were tracked, and every session is read once more.
    */
   openSessionIds?: string[]
 }
@@ -74,8 +77,9 @@ export interface OpenCodeCursor {
   lastMessageId: string
   /**
    * Messages behind the cursor that are read again on the next run: assistant
-   * messages whose usage was not final when they were last read, and rows
-   * that could not be read. The list is capped; see `MAX_PENDING_MESSAGES`.
+   * messages whose usage was not final when they were last read, rows that
+   * could not be read, and messages with a part that could not be read. The
+   * list is capped; see `MAX_PENDING_MESSAGES`.
    */
   pendingMessageIds?: string[]
 }

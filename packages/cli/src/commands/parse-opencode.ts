@@ -18,6 +18,12 @@ export interface OpenCodeImportOptions {
 export interface OpenCodeImportResult {
   records: StatsRecord[]
   toolCalls: ToolCallRecord[]
+  /**
+   * Ids of the records in `records` that had a part which could not be read,
+   * so `toolCalls` may be short of calls for them. Their messages are kept
+   * for another read.
+   */
+  incompleteToolCallRecordIds: string[]
   nextCursor: OpenCodeCursor | null
   errors: string[]
 }
@@ -121,6 +127,7 @@ export function runParseOpenCode(
   const { dbPath, device, deviceInstanceId, platform, now, cursor, exchangeRate } = options
   const records: StatsRecord[] = []
   const toolCalls: ToolCallRecord[] = []
+  const incompleteToolCallRecordIds: string[] = []
   const errors: string[] = []
 
   // Past the cursor, plus the messages behind it that were unfinished or
@@ -218,13 +225,16 @@ export function runParseOpenCode(
     // Load tool parts for this message
     const parts = partsStmt.all(message.id) as PartRow[]
     let callIndex = 0
+    let unreadableParts = 0
     for (const part of parts) {
       let partParsed: ParsedPartData
 
       try {
         partParsed = JSON.parse(part.data) as ParsedPartData
+        if (partParsed === null || typeof partParsed !== 'object' || Array.isArray(partParsed)) throw new Error('not an object')
       } catch (e) {
         errors.push(`message ${message.id} part ${part.id}: invalid JSON: ${e instanceof Error ? e.message : e}`)
+        unreadableParts++
         continue
       }
 
@@ -239,7 +249,16 @@ export function runParseOpenCode(
         callIndex++
       }
     }
+
+    // The calls read for this record may be short of one. The caller leaves
+    // the calls it has stored alone, and the message is read again: this may
+    // be the read on which its usage became final, and it would not be
+    // visited again otherwise.
+    if (unreadableParts > 0) {
+      incompleteToolCallRecordIds.push(recordId)
+      if (pending[pending.length - 1] !== message.id) pending.push(message.id)
+    }
   }
 
-  return { records, toolCalls, nextCursor: nextMessageCursor(cursor, messages, pending), errors }
+  return { records, toolCalls, incompleteToolCallRecordIds, nextCursor: nextMessageCursor(cursor, messages, pending), errors }
 }

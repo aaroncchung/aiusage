@@ -223,15 +223,35 @@ function normalizeKiroModel(value: unknown): string {
  * could not be read before) would shift them to new ids and leave the old
  * rows behind. All calls of such a record come from the one row it was built
  * from, so its stored calls are replaced as a whole.
+ *
+ * That holds only for a complete read. For a record in
+ * `incompleteRecordIds` part of the source could not be read, and the calls
+ * read now may be short of some: the calls stored for it are left as they
+ * are and the ones read now are dropped, since they could neither replace
+ * the stored ones nor be added to them without counting calls twice. When
+ * nothing is stored for the record yet, what could be read is stored. The
+ * importer reads such a record again, and the first complete read replaces
+ * whatever is stored.
  */
-function insertRecordsWithToolCalls(db: Database.Database, records: StatsRecord[], toolCalls: ToolCallRecord[]): void {
+function insertRecordsWithToolCalls(
+  db: Database.Database,
+  records: StatsRecord[],
+  toolCalls: ToolCallRecord[],
+  incompleteRecordIds: string[],
+): void {
+  const incomplete = new Set(incompleteRecordIds)
   const removeToolCalls = db.prepare('DELETE FROM tool_calls WHERE record_id = ?')
+  const hasToolCalls = db.prepare('SELECT 1 FROM tool_calls WHERE record_id = ? LIMIT 1')
   db.transaction(() => {
+    const kept = new Set<string>()
     for (const record of records) {
       insertRecord(db, record)
-      removeToolCalls.run(record.id)
+      if (!incomplete.has(record.id)) removeToolCalls.run(record.id)
+      else if (hasToolCalls.get(record.id)) kept.add(record.id)
     }
-    for (const tc of toolCalls) insertToolCall(db, tc)
+    for (const tc of toolCalls) {
+      if (tc.recordId === null || !kept.has(tc.recordId)) insertToolCall(db, tc)
+    }
   })()
 }
 
@@ -1016,7 +1036,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           exchangeRate,
         })
 
-        insertRecordsWithToolCalls(db, result.records, result.toolCalls)
+        insertRecordsWithToolCalls(db, result.records, result.toolCalls, result.incompleteToolCallRecordIds)
         if (result.nextCursor) {
           wm.setOpenCodeCursor(result.nextCursor)
           wm.save()
@@ -1050,7 +1070,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           exchangeRate,
         })
 
-        insertRecordsWithToolCalls(db, result.records, result.toolCalls)
+        insertRecordsWithToolCalls(db, result.records, result.toolCalls, result.incompleteToolCallRecordIds)
         if (result.nextCursor) {
           wm.setHermesCursor(result.nextCursor)
           wm.save()
