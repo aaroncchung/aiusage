@@ -4,7 +4,7 @@ import { generateRecordId, generateSyncRecordId } from '@aiusage/core'
 import type { StatsRecord, SyncRecord, Tool } from '@aiusage/core'
 import { initializeDatabase } from '../../src/db/index.js'
 import { getUnsyncedRecords, insertRecord, markRecordsSynced } from '../../src/db/records.js'
-import { DELETED_WHILE_UPLOADING } from '../../src/db/sync-claims.js'
+import { DELETED_LOCAL_ROWS } from '../../src/db/sync-claims.js'
 import {
   collapseImporterDuplicates,
   deleteCursorTranscriptEstimates,
@@ -16,8 +16,11 @@ import {
 /** The cloud store for one device, with the rules of the server's push route. */
 const server = new Map<string, { record: SyncRecord; deleted: boolean }>()
 const tombstonesSent: string[] = []
-/** Runs once while a record push is pending, as a parse in another process would. */
+/** Each runs once while a push of that kind is pending, as a parse in another process would. */
 let whileUploading: (() => void) | null = null
+let whileRetracting: (() => void) | null = null
+/** The server accepts the next record push, but the response does not arrive. */
+let loseResponse = false
 
 vi.mock('../../src/sync/cloud.js', () => ({
   CloudSyncError: class CloudSyncError extends Error {},
@@ -26,6 +29,11 @@ vi.mock('../../src/sync/cloud.js', () => ({
     if (records.length > 0 && whileUploading) {
       const run = whileUploading
       whileUploading = null
+      run()
+    }
+    if (tombstones.length > 0 && whileRetracting) {
+      const run = whileRetracting
+      whileRetracting = null
       run()
     }
     for (const record of records) {
@@ -38,6 +46,10 @@ vi.mock('../../src/sync/cloud.js', () => ({
       const held = server.get(tombstone.record_id)
       // A tombstone is a version of its own: only a newer record brings the id back.
       if (held) server.set(tombstone.record_id, { record: { ...held.record, updatedAt: tombstone.updatedAt }, deleted: true })
+    }
+    if (records.length > 0 && loseResponse) {
+      loseResponse = false
+      throw new Error('socket hang up')
     }
     return { inserted: 0, updated: 0, skipped: 0, syncGeneration: 1 }
   }),
@@ -77,6 +89,8 @@ describe('importer duplicates and sync targets', () => {
     server.clear()
     tombstonesSent.length = 0
     whileUploading = null
+    whileRetracting = null
+    loseResponse = false
     vi.clearAllMocks()
   })
 
@@ -89,8 +103,8 @@ describe('importer duplicates and sync targets', () => {
     return new CloudSyncOrchestrator(db, { deviceInstanceId: DEVICE }).sync()
   }
   const onServer = () => Array.from(server.values()).filter(held => !held.deleted).map(held => held.record)
-  /** The retraction queue of the sync targets, without the list of ids deleted while an upload may be pending. */
-  const retired = () => db.prepare(`SELECT target, wire_id FROM sync_retired_wire_ids WHERE target != ? ORDER BY target, wire_id`).all(DELETED_WHILE_UPLOADING) as Array<{ target: string; wire_id: string }>
+  /** The retraction queue of the sync targets, without the list of every deleted row. */
+  const retired = () => db.prepare(`SELECT target, wire_id FROM sync_retired_wire_ids WHERE target != ? ORDER BY target, wire_id`).all(DELETED_LOCAL_ROWS) as Array<{ target: string; wire_id: string }>
   const stored = (id: string) => db.prepare(`SELECT input_tokens, updated_at FROM records WHERE id = ?`).get(id) as { input_tokens: number; updated_at: number }
 
   it('retracts the Kiro rows the collapse deletes from the cloud', async () => {
@@ -128,14 +142,46 @@ describe('importer duplicates and sync targets', () => {
     expect(db.prepare(`SELECT COUNT(*) AS n FROM sync_retired_wire_ids`).get()).toEqual({ n: 0 })
   })
 
-  it('does not retract rows that were deleted before they were ever uploaded', async () => {
-    for (const row of [oldKiro(0, T0), oldKiro(0, T0 + 60_000)]) insertRecord(db, row)
+  it('retracts a row deleted during an upload whose response was lost', async () => {
+    const first = [oldKiro(0, T0), oldKiro(80, T0)]
+    const second = [oldKiro(0, T0 + 60_000), oldKiro(80, T0 + 60_000)]
+    for (const row of [...first, ...second]) insertRecord(db, row)
+    whileUploading = () => { collapseImporterDuplicates(db) }
+    loseResponse = true
+
+    expect((await cloudSync()).status).toBe('failed')
+    expect(onServer()).toHaveLength(4)
+    expect(retired()).toEqual([])
+
+    expect((await cloudSync()).status).toBe('ok')
+    expect(onServer().map(r => r.id).sort()).toEqual(second.map(row => row.id).sort())
+  })
+
+  it('sends a tombstone that changes nothing for a row that was deleted before it was uploaded', async () => {
+    const [deleted, kept] = [oldKiro(0, T0), oldKiro(0, T0 + 60_000)]
+    for (const row of [deleted, kept]) insertRecord(db, row)
     expect(collapseImporterDuplicates(db).kiro).toBe(1)
     expect(retired()).toEqual([])
 
-    const result = await cloudSync()
-    expect(result).toMatchObject({ status: 'ok', uploadedCount: 1, retiredCount: 0 })
-    expect(tombstonesSent).toEqual([])
+    expect((await cloudSync()).status).toBe('ok')
+    expect(tombstonesSent).toEqual([deleted.id])
+    expect(onServer().map(r => r.id)).toEqual([kept.id])
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM sync_retired_wire_ids`).get()).toEqual({ n: 0 })
+  })
+
+  it('does not send a tombstone for an id that is stored again while an earlier batch is pending', async () => {
+    const restored = record('kiro', kiroLogLineId(DEVICE, KIRO_LOG, 0, 'line'), KIRO_LOG, T0, { updatedAt: Date.now() })
+    const queue = db.prepare(`INSERT INTO sync_retired_wire_ids (target, wire_id) VALUES ('cloud', ?)`)
+    // More than one batch of ids that sort before the record's.
+    for (let i = 0; i < 500; i++) queue.run(`!${String(i).padStart(3, '0')}`)
+    queue.run(restored.id)
+    whileRetracting = () => { replaceKiroLogLines(db, KIRO_LOG, [restored]) }
+
+    expect((await cloudSync()).status).toBe('ok')
+    expect(tombstonesSent).toHaveLength(500)
+    expect(tombstonesSent).not.toContain(restored.id)
+    expect((await cloudSync()).uploadedCount).toBe(1)
+    expect(onServer().map(r => r.id)).toEqual([restored.id])
   })
 
   it('queues a deleted row only for the targets that acknowledged it', () => {
@@ -168,8 +214,9 @@ describe('importer duplicates and sync targets', () => {
     insertRecord(db, estimate)
     await cloudSync()
 
-    // The transcript grew, and state.vscdb delivered the conversation's token counts in the same parse.
-    expect(replaceSourceSnapshot(db, 'cursor', TRANSCRIPT, { ...estimate, inputTokens: 300, updatedAt: Date.now() }, 'larger')).toBe(true)
+    // The transcript grew, and state.vscdb delivered the conversation's token counts
+    // in the same parse. The clock of that parse is not ahead of the stored version.
+    expect(replaceSourceSnapshot(db, 'cursor', TRANSCRIPT, { ...estimate, inputTokens: 300 }, 'larger')).toBe(true)
     expect(getUnsyncedRecords(db, 'cloud', DEVICE).map(r => r.id)).toEqual([estimate.id])
     expect(deleteCursorTranscriptEstimates(db, ['c1'])).toBe(1)
     expect(retired()).toEqual([{ target: 'cloud', wire_id: estimate.id }])
@@ -246,6 +293,22 @@ describe('importer duplicates and sync targets', () => {
     await cloudSync()
     expect(tombstonesSent).toEqual([])
     expect(onServer().map(r => [r.id, r.inputTokens])).toEqual([[wire, 2500]])
+  })
+
+  it('stores a record that replaces a row of the same id as a newer version, whatever the clock says', async () => {
+    const id = generateRecordId(DEVICE, CONVERSATION, 0)
+    // The stored version is ahead of this parse's clock.
+    const ahead = Date.now() + 3_600_000
+    insertRecord(db, record('codebuddy', id, CONVERSATION, T0, { inputTokens: 1000, updatedAt: ahead }))
+    await cloudSync()
+
+    const next = record('codebuddy', id, CONVERSATION, T0 + 60_000, { inputTokens: 2500, updatedAt: Date.now() })
+    expect(replaceSourceSnapshot(db, 'codebuddy', CONVERSATION, next, 'later')).toBe(true)
+    expect(stored(id).updated_at).toBeGreaterThan(ahead)
+    expect(getUnsyncedRecords(db, 'cloud', DEVICE).map(r => r.id)).toEqual([id])
+
+    await cloudSync()
+    expect(onServer().map(r => [r.id, r.inputTokens])).toEqual([[id, 2500]])
   })
 
   it('takes a wire id off the retraction queue when a record is stored under it again', async () => {

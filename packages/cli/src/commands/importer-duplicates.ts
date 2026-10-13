@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
 import { generateRecordId, type StatsRecord, type Tool } from '@aiusage/core'
 import { getRecordById, getRecordsBySourceFile, insertRecord, LOCAL_RECORDS_WHERE } from '../db/records.js'
-import { DELETED_WHILE_UPLOADING } from '../db/sync-claims.js'
+import { DELETED_LOCAL_ROWS } from '../db/sync-claims.js'
 import { mapStatsRecordToSyncRecord, usesGeneratedWireId } from '../sync/mapper.js'
 import { CURRENT_IMPORTER_DEDUP_VERSION, type WatermarkManager } from '../watermark.js'
 
@@ -61,10 +61,10 @@ function wireId(record: StatsRecord): string {
  *    (GitHub, S3) publishes this device's namespace as a snapshot of its
  *    local records, so the copy is gone with the next sync anyway and the
  *    queue entry is cleared unused. Nothing is queued for a target that never
- *    acknowledged the row. A sync may be uploading the row at this moment,
- *    read before the delete and not acknowledged yet, so the wire id is also
- *    listed under `DELETED_WHILE_UPLOADING` for the cloud target to retire
- *    if it finds it has just uploaded it.
+ *    acknowledged the row. The cloud target can hold a row it has not
+ *    acknowledged (an upload read before the delete, a lost response), so
+ *    the wire id is also listed under `DELETED_LOCAL_ROWS`, which the cloud
+ *    target retracts as well; that changes nothing where the id is unknown.
  *  - One is left (CodeBuddy IDE snapshots of one conversation share a wire
  *    id): retiring the id would delete the row that stands for it now, so
  *    nothing is queued. The remaining row is the correction of the deleted
@@ -93,7 +93,7 @@ export function deleteLocalRecords(db: Database.Database, ids: Iterable<string>)
       const heirs = !usesGeneratedWireId(record.tool) ? [] : getRecordsBySourceFile(db, record.sourceFile)
         .filter(other => other.origin === 'local' && wireId(other) === published)
       if (heirs.length === 0) {
-        for (const target of [...targets, DELETED_WHILE_UPLOADING]) retire.run(target, published)
+        for (const target of [...targets, DELETED_LOCAL_ROWS]) retire.run(target, published)
         continue
       }
       for (const heir of heirs) advance.run(Math.max(Date.now(), record.updatedAt + 1), heir.id, record.updatedAt)
@@ -109,19 +109,23 @@ export function deleteLocalRecords(db: Database.Database, ids: Iterable<string>)
  * delete the record just stored.
  *
  * `insertRecord` replaces a row of the same id, and the row's sync state goes
- * with the replaced row. It is put back when it is older than the record, so
- * the record still counts as unsynced, and `deleteLocalRecords` still knows
- * which targets hold the row if it is deleted before the next sync.
+ * with the replaced row. The state is put back, so `deleteLocalRecords` still
+ * knows which targets hold the row if it is deleted before the next sync. The
+ * record is a new version of that row: its `updated_at` is moved past the
+ * replaced row's and past what the targets acknowledged if the clock has not
+ * done so, or targets and peers would keep the version they hold and the
+ * record would not count as unsynced.
  */
 function storeRecords(db: Database.Database, records: StatsRecord[]): void {
+  const replaced = db.prepare(`SELECT updated_at FROM records WHERE id = ?`).pluck()
   const acknowledged = db.prepare(`SELECT target, synced_at FROM sync_record_state WHERE record_id = ?`)
   const restore = db.prepare(`INSERT OR IGNORE INTO sync_record_state (record_id, target, synced_at) VALUES (?, ?, ?)`)
   for (const record of records) {
     const state = acknowledged.all(record.id) as Array<{ target: string; synced_at: number }>
-    insertRecord(db, record)
-    for (const { target, synced_at } of state) {
-      if (synced_at < record.updatedAt) restore.run(record.id, target, synced_at)
-    }
+    const held = [replaced.get(record.id) as number | undefined ?? -1, ...state.map(row => row.synced_at)]
+    const updatedAt = Math.max(record.updatedAt, ...held.map(version => version + 1))
+    insertRecord(db, updatedAt === record.updatedAt ? record : { ...record, updatedAt })
+    for (const { target, synced_at } of state) restore.run(record.id, target, synced_at)
   }
   if (records.length === 0) return
   const targets = db.prepare(`SELECT DISTINCT target FROM sync_retired_wire_ids`).pluck().all() as string[]

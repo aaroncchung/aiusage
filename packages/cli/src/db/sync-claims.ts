@@ -168,31 +168,16 @@ export function releaseClaim(db: Database.Database, target: string, recordId: st
  * tombstones.
  */
 /**
- * Not a sync target: the key under which `sync_retired_wire_ids` lists wire
- * ids whose local row was deleted by a parse (see `deleteLocalRecords` in
- * `commands/importer-duplicates.ts`). Such a row may sit in an upload that
- * was read before the delete and is acknowledged after it, which the delete
- * cannot see; the target that finds it has just uploaded a listed id retires
- * it (`retireDeletedUploads`).
+ * Not a sync target: the key under which `sync_retired_wire_ids` lists the
+ * wire id of every local row a parse deleted for good (see
+ * `deleteLocalRecords` in `commands/importer-duplicates.ts`). The delete
+ * queues the id for the targets that had acknowledged the row, but an
+ * acknowledgement can be missing for a row a target holds: the row sat in an
+ * upload that was read before the delete, or the response to its upload was
+ * lost. The cloud target therefore retracts every listed id as well; for an
+ * id it never received the tombstone changes nothing.
  */
-export const DELETED_WHILE_UPLOADING = '*'
-
-/**
- * Queue for retraction from `target` those of the `uploaded` wire ids whose
- * local row was deleted since it was read for the upload. Returns the number
- * of ids queued.
- */
-export function retireDeletedUploads(db: Database.Database, target: string, uploaded: string[]): number {
-  const listed = db.prepare(`SELECT 1 FROM sync_retired_wire_ids WHERE target = '${DELETED_WHILE_UPLOADING}' AND wire_id = ?`)
-  const retire = db.prepare(`INSERT OR IGNORE INTO sync_retired_wire_ids (target, wire_id) VALUES (?, ?)`)
-  return db.transaction(() => {
-    let retired = 0
-    for (const wireId of uploaded) {
-      if (listed.get(wireId)) retired += retire.run(target, wireId).changes
-    }
-    return retired
-  })()
-}
+export const DELETED_LOCAL_ROWS = '*'
 
 export function getRetiredWireIds(db: Database.Database, target: string): string[] {
   const rows = db.prepare(`SELECT wire_id FROM sync_retired_wire_ids WHERE target = ?`).all(target) as Array<{ wire_id: string }>
