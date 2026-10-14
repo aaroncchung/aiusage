@@ -21,6 +21,13 @@ export interface GooseImportOptions {
 
 export interface GooseImportResult {
   records: StatsRecord[]
+  /**
+   * Records of sessions whose creation time cannot be read. Their id and
+   * time come from the time of this import, so neither is the same on the
+   * next run: the caller gives them those of the record it has stored for
+   * the session, if there is one.
+   */
+  undatedRecords: StatsRecord[]
   nextCursor: GooseCursor | null
   errors: string[]
 }
@@ -51,6 +58,7 @@ function parseTs(value: unknown, fallback: number): number {
 export function runParseGoose(db: Database.Database, options: GooseImportOptions): GooseImportResult {
   const { dbPath, device, deviceInstanceId, platform, now, cursor, exchangeRate } = options
   const records: StatsRecord[] = []
+  const undatedRecords: StatsRecord[] = []
   const errors: string[] = []
   let nextCursor: GooseCursor | null = null
 
@@ -78,10 +86,6 @@ export function runParseGoose(db: Database.Database, options: GooseImportOptions
     const id = String(row.id ?? '')
     const isNew = !cursor || createdAt > cursor.lastCreatedAt || (createdAt === cursor.lastCreatedAt && id > cursor.lastId)
     if (isNew) nextCursor = { lastCreatedAt: createdAt, lastId: id }
-    // The record id is built from the creation time. A row whose creation
-    // time cannot be read gets the time of the import instead, so reading it
-    // again would add a record each time: such a row is imported only once.
-    if (!isNew && !Number.isFinite(parseTs(row.created_at, NaN))) continue
     const model = parseModel(row.model_config_json)
     const inputTokens = Number(row.accumulated_input_tokens ?? row.input_tokens ?? 0) || 0
     const outputTokens = Number(row.accumulated_output_tokens ?? row.output_tokens ?? 0) || 0
@@ -92,7 +96,10 @@ export function runParseGoose(db: Database.Database, options: GooseImportOptions
     const tokenArgs = { inputTokens: adjustedInput, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, thinkingTokens: 0 }
     const cost = model !== 'unknown' ? calculateCost(model, tokenArgs, exchangeRate) : 0
 
-    records.push({
+    // The record id is built from the creation time. A row whose creation
+    // time cannot be read gets the time of the import instead.
+    const dated = Number.isFinite(parseTs(row.created_at, NaN))
+    ;(dated ? records : undatedRecords).push({
       id: recordIdFor(options, `${dbPath}:${row.id}`, parseTs(row.created_at, now)),
       ts: parseTs(row.created_at, now),
       ingestedAt: now,
@@ -116,5 +123,5 @@ export function runParseGoose(db: Database.Database, options: GooseImportOptions
     })
   }
 
-  return { records, nextCursor, errors }
+  return { records, undatedRecords, nextCursor, errors }
 }

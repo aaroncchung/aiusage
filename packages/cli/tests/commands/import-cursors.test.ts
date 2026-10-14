@@ -494,6 +494,40 @@ describe('runParse with both opencode.db and kilo.db (#82)', () => {
     expect(row()).toMatchObject({ id: first.id, input_tokens: 5000, output_tokens: 500 })
     expect(getUnsyncedRecords(cache, target, DEVICE).map(r => r.id)).toEqual([first.id])
   })
+
+  it('imports a Goose session without a readable creation time once it has usage, and follows it as one record', async () => {
+    const goose = sourceDb('sessions.db', GOOSE_SCHEMA)
+    putGooseSession(goose, 's0', 'not a date', 10, 1)
+    putGooseSession(goose, 's1', 'not a date', 0, 0)
+    discovery.dbPaths = { goose: join(dir, 'sessions.db') }
+    const target = 'cloud:https://sync.example.test'
+    const rows = () => cache.prepare("SELECT id, ts, session_id, input_tokens, updated_at FROM records WHERE tool = 'goose' ORDER BY session_id").all() as { id: string; ts: number; session_id: string; input_tokens: number; updated_at: number }[]
+    const setUsage = goose.prepare('UPDATE sessions SET accumulated_input_tokens = ?, accumulated_output_tokens = 10, accumulated_total_tokens = ? + 10 WHERE id = ?')
+
+    // No usage yet: nothing is stored for s1, and the cursor has passed it.
+    await runParse(cache, 'goose')
+    expect(rows().map(r => r.session_id)).toEqual(['s0'])
+
+    setUsage.run(100, 100, 's1')
+    await runParse(cache, 'goose')
+    const first = rows()
+    expect(first.map(r => [r.session_id, r.input_tokens])).toEqual([['s0', 10], ['s1', 100]])
+    markRecordVersionsSynced(cache, first.map(r => ({ id: r.id, updatedAt: r.updated_at })), target)
+
+    // Nothing changed: no second record, although the import time moved on.
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await runParse(cache, 'goose')
+    expect(rows()).toEqual(first)
+    expect(getUnsyncedRecords(cache, target, DEVICE)).toEqual([])
+
+    setUsage.run(500, 500, 's1')
+    await runParse(cache, 'goose')
+    expect(rows().map(r => [r.id, r.ts, r.input_tokens])).toEqual([
+      [first[0].id, first[0].ts, 10],
+      [first[1].id, first[1].ts, 500],
+    ])
+    expect(getUnsyncedRecords(cache, target, DEVICE).map(r => r.id)).toEqual([first[1].id])
+  })
 })
 
 const GOOSE_SCHEMA = `
@@ -533,16 +567,21 @@ describe('Goose import (#83)', () => {
     ])
   })
 
-  it('imports a session whose creation time cannot be read only once', () => {
+  it('sets a session whose creation time cannot be read apart, on every run', () => {
     const db = sourceDb('sessions.db', GOOSE_SCHEMA)
     putGooseSession(db, 's1', 'not a date', 1000, 100)
+    putGooseSession(db, 's2', '2026-07-06 09:00:00', 10, 1)
 
     const first = run(db, null)
-    expect(first.records).toHaveLength(1)
+    expect(first.records.map(r => r.sessionId)).toEqual(['s2'])
+    expect(first.undatedRecords.map(r => [r.sessionId, r.ts])).toEqual([['s1', NOW]])
 
-    // Its record id is built from the import time, so reading it again
-    // would add a second record.
-    expect(run(db, first.nextCursor, NOW + 1000).records).toEqual([])
+    // Its record id and time are built from the import time: the caller
+    // matches it to the record it has stored by session id.
+    const second = run(db, first.nextCursor, NOW + 1000)
+    expect(second.records.map(r => r.sessionId)).toEqual(['s2'])
+    expect(second.undatedRecords.map(r => [r.sessionId, r.ts])).toEqual([['s1', NOW + 1000]])
+    expect(second.undatedRecords[0].id).not.toBe(first.undatedRecords[0].id)
   })
 })
 

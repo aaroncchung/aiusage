@@ -1231,11 +1231,18 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           exchangeRate,
         })
         for (const record of result.records) insertRecord(db, record)
+        // A session without a readable creation time is found again by its
+        // session id, and keeps the id and time it was first stored under.
+        const storedRecord = db.prepare("SELECT id, ts FROM records WHERE tool = 'goose' AND device_instance_id = ? AND source_file = ? AND session_id = ?")
+        for (const record of result.undatedRecords) {
+          const stored = storedRecord.get(deviceInstanceId, gooseDbPath, record.sessionId) as { id: string; ts: number } | undefined
+          insertRecord(db, stored ? { ...record, id: stored.id, ts: stored.ts } : record)
+        }
         if (result.nextCursor) {
           wm.setGooseCursor(result.nextCursor)
           wm.save()
         }
-        parsedCount += result.records.length
+        parsedCount += result.records.length + result.undatedRecords.length
         errors.push(...result.errors)
         onProgress({ phase: 'Parsing SQLite', tool: 'goose', current: 1, total: 1, records: parsedCount, toolCalls: toolCallCount })
       } finally {
