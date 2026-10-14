@@ -3,6 +3,7 @@ import type { StatsRecord, SyncRecord } from '@aiusage/core'
 import {
   backfillUnknownDeviceInstanceId,
   clearSyncRecordState,
+  getLocalRecordsForDevice,
   getUnsyncedRecords,
   isUploadableLocalRecord,
   markRecordVersionsSynced,
@@ -365,6 +366,7 @@ export class CloudSyncOrchestrator {
    */
   private async pushRetiredIds(syncGeneration: number): Promise<{ retiredCount: number; unretiredCount: number }> {
     unretirePublishedWireIds(this.db, this.target, this.options.deviceInstanceId)
+    this.unretireLiveWireIds()
     let retiredCount = 0
     let unretiredCount = 0
     const storable = (id: string): boolean => id !== '' && !id.includes('\u0000')
@@ -388,5 +390,28 @@ export class CloudSyncOrchestrator {
       retiredCount += applied.length
       unretiredCount += batch.length - applied.length
     }
+  }
+
+  /**
+   * Take every wire id off the queue that a local row of this device is
+   * published under: `push` has just uploaded that row, and its tombstone
+   * would delete it on the server for good, since the row counts as synced.
+   * A parse of this version never leaves such an entry (it stores through
+   * `storeRecords` in `commands/importer-duplicates.ts`), but a row can come
+   * back under a queued id by other means, e.g. an older CLI that reads the
+   * source again under the id it always used. The check is made here, where
+   * the queue turns into deletions, so it holds however the row came back.
+   * It reads the local rows once, and only when something is queued.
+   */
+  private unretireLiveWireIds(): void {
+    this.db.transaction(() => {
+      const queued = new Set([...getRetiredWireIds(this.db, this.target), ...getRetiredWireIds(this.db, DELETED_LOCAL_ROWS)])
+      if (queued.size === 0) return
+      const live = getLocalRecordsForDevice(this.db, this.options.deviceInstanceId)
+        .map(record => mapStatsRecordToSyncRecord(record).id)
+        .filter(id => queued.has(id))
+      clearRetiredWireIds(this.db, this.target, live)
+      clearRetiredWireIds(this.db, DELETED_LOCAL_ROWS, live)
+    }).immediate()
   }
 }

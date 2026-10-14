@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { writeFileSync } from 'node:fs'
 import { generateRecordId, generateSyncRecordId } from '@aiusage/core'
 import type { StatsRecord, SyncRecord, Tool } from '@aiusage/core'
 import { initializeDatabase } from '../../src/db/index.js'
@@ -9,9 +12,11 @@ import {
   collapseImporterDuplicates,
   deleteCursorTranscriptEstimates,
   kiroLogLineId,
+  repairImporterDuplicates,
   replaceKiroLogLines,
   replaceSourceSnapshot,
 } from '../../src/commands/importer-duplicates.js'
+import { WatermarkManager } from '../../src/watermark.js'
 
 /** The cloud store for one device, with the rules of the server's push route. */
 const server = new Map<string, { record: SyncRecord; deleted: boolean }>()
@@ -327,5 +332,50 @@ describe('importer duplicates and sync targets', () => {
 
     await cloudSync()
     expect(onServer().map(r => r.id)).toEqual([original.id])
+  })
+
+  it('does not retract a row that an older CLI stored again before the repair ran a second time', async () => {
+    const [first, second] = [oldKiro(0, T0), oldKiro(0, T0 + 60_000)]
+    for (const row of [first, second]) insertRecord(db, row)
+    await cloudSync()
+    // tests/setup-home.ts gives this file its own home directory.
+    const watermarkPath = join(homedir(), 'watermark.json')
+    writeFileSync(watermarkPath, JSON.stringify({ files: {} }))
+    expect(repairImporterDuplicates(db, new WatermarkManager(watermarkPath))?.kiro).toBe(1)
+    expect(retired()).toEqual([{ target: 'cloud', wire_id: first.id }])
+
+    // Before the next sync an older CLI reads a restored copy of the log with
+    // the first file time, which stores the deleted row again under its id,
+    // and saves watermark.json without the repair version. Then the log is gone.
+    insertRecord(db, { ...first, updatedAt: Date.now() })
+    writeFileSync(watermarkPath, JSON.stringify({ files: {} }))
+    // The repair runs again and keeps the row written last; no importer reads the source again.
+    expect(repairImporterDuplicates(db, new WatermarkManager(watermarkPath))?.kiro).toBe(1)
+    expect(db.prepare(`SELECT id FROM records`).all()).toEqual([{ id: first.id }])
+
+    expect(await cloudSync()).toMatchObject({ status: 'ok', uploadedCount: 1, retiredCount: 1 })
+    expect(tombstonesSent).toEqual([second.id])
+    expect(onServer().map(r => r.id)).toEqual([first.id])
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM sync_retired_wire_ids WHERE target IN ('cloud', ?)`).get(DELETED_LOCAL_ROWS)).toEqual({ n: 0 })
+
+    expect(await cloudSync()).toMatchObject({ uploadedCount: 0, retiredCount: 0 })
+    expect(onServer().map(r => r.id)).toEqual([first.id])
+  })
+
+  it('does not retract a queued wire id that a local Cursor or CodeBuddy row is published under', async () => {
+    // Rows an older CLI stored again under ids the repair had deleted and queued.
+    const estimate = record('cursor', generateRecordId(DEVICE, TRANSCRIPT, T0), TRANSCRIPT, T0)
+    const snapshot = oldConversation(T0, 1000, T0)
+    const wire = generateSyncRecordId(DEVICE, CONVERSATION, 0)
+    for (const row of [estimate, snapshot]) insertRecord(db, row)
+    const queue = db.prepare(`INSERT INTO sync_retired_wire_ids (target, wire_id) VALUES (?, ?)`)
+    for (const target of ['cloud', DELETED_LOCAL_ROWS]) {
+      for (const id of [estimate.id, wire, 'gone']) queue.run(target, id)
+    }
+
+    expect(await cloudSync()).toMatchObject({ status: 'ok', uploadedCount: 2, retiredCount: 1 })
+    expect(tombstonesSent).toEqual(['gone'])
+    expect(onServer().map(r => r.id).sort()).toEqual([estimate.id, wire].sort())
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM sync_retired_wire_ids`).get()).toEqual({ n: 0 })
   })
 })
