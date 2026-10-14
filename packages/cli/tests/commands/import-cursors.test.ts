@@ -528,6 +528,29 @@ describe('runParse with both opencode.db and kilo.db (#82)', () => {
     ])
     expect(getUnsyncedRecords(cache, target, DEVICE).map(r => r.id)).toEqual([first[1].id])
   })
+
+  it.each([
+    ['gets a readable creation time', 'not a date', '2026-07-06 08:00:00'],
+    ['loses its readable creation time', '2026-07-06 08:00:00', 'not a date'],
+  ])('keeps one record for a Goose session that %s', async (_name, before, after) => {
+    const goose = sourceDb('sessions.db', GOOSE_SCHEMA)
+    putGooseSession(goose, 's0', before, 100, 10)
+    discovery.dbPaths = { goose: join(dir, 'sessions.db') }
+    const rows = () => cache.prepare("SELECT id, ts, input_tokens, updated_at FROM records WHERE tool = 'goose'").all() as { id: string; ts: number; input_tokens: number; updated_at: number }[]
+
+    await runParse(cache, 'goose')
+    const first = rows()
+    expect(first.map(r => r.input_tokens)).toEqual([100])
+
+    goose.prepare('UPDATE sessions SET created_at = ?, accumulated_input_tokens = 500, accumulated_total_tokens = 510 WHERE id = ?').run(after, 's0')
+    await runParse(cache, 'goose')
+    const second = rows()
+    expect(second.map(r => [r.id, r.ts, r.input_tokens])).toEqual([[first[0].id, first[0].ts, 500]])
+
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await runParse(cache, 'goose')
+    expect(rows()).toEqual(second)
+  })
 })
 
 const GOOSE_SCHEMA = `
@@ -567,21 +590,18 @@ describe('Goose import (#83)', () => {
     ])
   })
 
-  it('sets a session whose creation time cannot be read apart, on every run', () => {
+  it('reads a session whose creation time cannot be read on every run', () => {
     const db = sourceDb('sessions.db', GOOSE_SCHEMA)
     putGooseSession(db, 's1', 'not a date', 1000, 100)
-    putGooseSession(db, 's2', '2026-07-06 09:00:00', 10, 1)
 
     const first = run(db, null)
-    expect(first.records.map(r => r.sessionId)).toEqual(['s2'])
-    expect(first.undatedRecords.map(r => [r.sessionId, r.ts])).toEqual([['s1', NOW]])
+    expect(first.records.map(r => [r.sessionId, r.ts])).toEqual([['s1', NOW]])
 
     // Its record id and time are built from the import time: the caller
     // matches it to the record it has stored by session id.
     const second = run(db, first.nextCursor, NOW + 1000)
-    expect(second.records.map(r => r.sessionId)).toEqual(['s2'])
-    expect(second.undatedRecords.map(r => [r.sessionId, r.ts])).toEqual([['s1', NOW + 1000]])
-    expect(second.undatedRecords[0].id).not.toBe(first.undatedRecords[0].id)
+    expect(second.records.map(r => [r.sessionId, r.ts])).toEqual([['s1', NOW + 1000]])
+    expect(second.records[0].id).not.toBe(first.records[0].id)
   })
 })
 

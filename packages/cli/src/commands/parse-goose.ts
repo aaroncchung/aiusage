@@ -21,13 +21,6 @@ export interface GooseImportOptions {
 
 export interface GooseImportResult {
   records: StatsRecord[]
-  /**
-   * Records of sessions whose creation time cannot be read. Their id and
-   * time come from the time of this import, so neither is the same on the
-   * next run: the caller gives them those of the record it has stored for
-   * the session, if there is one.
-   */
-  undatedRecords: StatsRecord[]
   nextCursor: GooseCursor | null
   errors: string[]
 }
@@ -58,7 +51,6 @@ function parseTs(value: unknown, fallback: number): number {
 export function runParseGoose(db: Database.Database, options: GooseImportOptions): GooseImportResult {
   const { dbPath, device, deviceInstanceId, platform, now, cursor, exchangeRate } = options
   const records: StatsRecord[] = []
-  const undatedRecords: StatsRecord[] = []
   const errors: string[] = []
   let nextCursor: GooseCursor | null = null
 
@@ -96,10 +88,11 @@ export function runParseGoose(db: Database.Database, options: GooseImportOptions
     const tokenArgs = { inputTokens: adjustedInput, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, thinkingTokens: 0 }
     const cost = model !== 'unknown' ? calculateCost(model, tokenArgs, exchangeRate) : 0
 
-    // The record id is built from the creation time. A row whose creation
-    // time cannot be read gets the time of the import instead.
-    const dated = Number.isFinite(parseTs(row.created_at, NaN))
-    ;(dated ? records : undatedRecords).push({
+    // The record id is built from the creation time, and a row whose
+    // creation time cannot be read gets the time of the import instead: the
+    // caller gives a record the id and time of the one it has stored for the
+    // session, if there is one.
+    records.push({
       id: recordIdFor(options, `${dbPath}:${row.id}`, parseTs(row.created_at, now)),
       ts: parseTs(row.created_at, now),
       ingestedAt: now,
@@ -123,5 +116,5 @@ export function runParseGoose(db: Database.Database, options: GooseImportOptions
     })
   }
 
-  return { records, undatedRecords, nextCursor, errors }
+  return { records, nextCursor, errors }
 }
