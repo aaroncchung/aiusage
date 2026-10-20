@@ -769,6 +769,18 @@ export function runParseAntigravity(db: Database.Database, options: AntigravityI
   const hasUsage = (window: Window): boolean => window.generation.events.length > 0
     || [...window.stepIndices, ...window.generation.stepIndices].some((index) => (steps.get(index)?.events.length ?? 0) > 0)
   const settled = latest != null && !hasUsage(latest) ? windows.slice(0, -1) : windows
+  // Steps after the last window's upper bound fall in no window: usage
+  // Antigravity stores after the last generation's linked steps, such as a
+  // helper-model call made after the final response (#78). They go to the
+  // last settled window, after all of its rows, which is where they sit once
+  // a later generation's window covers them. They never settle the latest
+  // generation: usage after its linked steps is not its own. The cursor
+  // counts generations and records nothing about them, so every import reads
+  // them again; a record's id comes from its response identity, not its
+  // window, so reading them again, or later in another window, rewrites the
+  // same records.
+  const tail = settled[settled.length - 1]
+  const trailingSteps = tail == null ? [] : [...steps.keys()].filter((index) => index > previousStep)
 
   // Numeric ids this database pairs with readable names: an event whose id is
   // named only elsewhere in the database (a helper model, a retry on another
@@ -782,7 +794,7 @@ export function runParseAntigravity(db: Database.Database, options: AntigravityI
   interface ParsedRow { named: NamedModel; kind: 'generation' | 'step'; index: number }
   const parsedRows: ParsedRow[] = [
     ...settled.map((window): ParsedRow => ({ named: window.generation, kind: 'generation', index: window.generation.index })),
-    ...settled.flatMap((window) => window.stepIndices.map((index): ParsedRow => ({ named: steps.get(index)!, kind: 'step', index }))),
+    ...[...settled.flatMap((window) => window.stepIndices), ...trailingSteps].map((index): ParsedRow => ({ named: steps.get(index)!, kind: 'step', index })),
   ]
   const learned = new Map<number, string>()
   const namedBy = new Map<number, ParsedRow>()
@@ -798,12 +810,12 @@ export function runParseAntigravity(db: Database.Database, options: AntigravityI
   for (const row of parsedRows) if (row.named.inferred && row.named.modelId != null) row.named.model = learned.get(row.named.modelId) ?? row.named.model
 
   // Rows this import processes: the generations from the cursor on, the steps
-  // their windows cover, and the steps they link — a step written for a new
+  // their windows cover, the steps they link — a step written for a new
   // generation falls into an earlier generation's window when the new one
   // links lower step indices than its predecessor, and a full import records
-  // it there.
+  // it there — and the trailing steps.
   const processedGenerations = settled.filter((window) => window.generation.index >= firstIndex)
-  const processedSteps = new Set(processedGenerations.flatMap((window) => [...window.stepIndices, ...window.generation.stepIndices]))
+  const processedSteps = new Set([...processedGenerations.flatMap((window) => [...window.stepIndices, ...window.generation.stepIndices]), ...trailingSteps])
   const lastProcessed = processedGenerations[processedGenerations.length - 1]
   if (lastProcessed) nextIndex = lastProcessed.generation.index + 1
 
@@ -827,19 +839,22 @@ export function runParseAntigravity(db: Database.Database, options: AntigravityI
     currentAt.set(generation.index, current)
     for (const index of generation.stepIndices) if (!linkedBy.has(index)) linkedBy.set(index, generation)
   }
-  const events: UsageEvent[] = []
-  for (const { generation, stepIndices, linkedTs } of settled) {
-    const rowEvents: Array<[UsageEvent, NamedModel | undefined]> = [
-      ...stepIndices.flatMap((index) => steps.get(index)!.events.map((event): [UsageEvent, NamedModel | undefined] =>
-        [{ ...event, fresh: processedSteps.has(index) }, currentAt.get((linkedBy.get(index) ?? generation).index)])),
+  const stepEvents = (stepIndices: number[], generation: GenerationMetadata): Array<[UsageEvent, NamedModel | undefined]> =>
+    stepIndices.flatMap((index) => steps.get(index)!.events.map((event): [UsageEvent, NamedModel | undefined] =>
+      [{ ...event, fresh: processedSteps.has(index) }, currentAt.get((linkedBy.get(index) ?? generation).index)]))
+  const rowEvents: Array<[UsageEvent, NamedModel | undefined]> = [
+    ...settled.flatMap(({ generation, stepIndices, linkedTs }) => [
+      ...stepEvents(stepIndices, generation),
       ...generation.events.map((event): [UsageEvent, NamedModel | undefined] =>
         [{ ...event, ts: event.ts ?? linkedTs, fresh: generation.index >= firstIndex }, currentAt.get(generation.index)]),
-    ]
-    for (const [event, context] of rowEvents) {
-      event.model = inheritedModel(event.usage.modelId, event.owner, [context, lastNamed], learned)
-      event.namedByLast = event.model != null && inheritedModel(event.usage.modelId, event.owner, [context], learned) !== event.model
-      events.push(event)
-    }
+    ]),
+    ...(tail == null ? [] : stepEvents(trailingSteps, tail.generation)),
+  ]
+  const events: UsageEvent[] = []
+  for (const [event, context] of rowEvents) {
+    event.model = inheritedModel(event.usage.modelId, event.owner, [context, lastNamed], learned)
+    event.namedByLast = event.model != null && inheritedModel(event.usage.modelId, event.owner, [context], learned) !== event.model
+    events.push(event)
   }
 
   // Ids first named by a row this import processed. Usage imported earlier
