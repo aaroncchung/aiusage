@@ -345,6 +345,42 @@ describe('importer duplicates and sync targets', () => {
     expect(retired()).toEqual([])
   })
 
+  it('advances a kept CodeBuddy snapshot past its own acknowledgement when the clock is behind it', () => {
+    const latest = oldConversation(T0 + 60_000, 2500, T0 + 60_000)
+    const earlier = oldConversation(T0, 1000, T0 + 120_000)
+    for (const row of [latest, earlier]) insertRecord(db, row)
+    // A file target acknowledges the time of its upload, here ahead of this device's clock.
+    const ahead = Date.now() + 3_600_000
+    markRecordsSynced(db, [latest.id], ahead, GITHUB)
+    expect(getUnsyncedRecords(db, GITHUB, DEVICE).map(r => r.id)).toEqual([earlier.id])
+
+    expect(collapseImporterDuplicates(db).codebuddy).toBe(1)
+    expect(stored(latest.id).updated_at).toBeGreaterThan(ahead)
+    expect(getUnsyncedRecords(db, GITHUB, DEVICE).map(r => r.id)).toEqual([latest.id])
+  })
+
+  it('leaves a Kiro line, a Cursor estimate and a CodeBuddy snapshot synced when they are read again unchanged', async () => {
+    const line = record('kiro', kiroLogLineId(DEVICE, KIRO_LOG, 0, 'line'), KIRO_LOG, T0)
+    const estimate = record('cursor', generateRecordId(DEVICE, TRANSCRIPT, 0), TRANSCRIPT, T0)
+    const snapshot = record('codebuddy', generateRecordId(DEVICE, CONVERSATION, 0), CONVERSATION, T0)
+    replaceKiroLogLines(db, KIRO_LOG, [line])
+    expect(replaceSourceSnapshot(db, 'cursor', TRANSCRIPT, estimate, 'larger')).toBe(true)
+    expect(replaceSourceSnapshot(db, 'codebuddy', CONVERSATION, snapshot, 'later')).toBe(true)
+    expect((await cloudSync()).uploadedCount).toBe(3)
+    const versions = [line, estimate, snapshot].map(r => stored(r.id).updated_at)
+
+    // Read again by a later parse: same values, a later clock.
+    const again = (r: StatsRecord) => ({ ...r, ingestedAt: T0 + 60_000, updatedAt: T0 + 60_000 })
+    replaceKiroLogLines(db, KIRO_LOG, [again(line)])
+    expect(replaceSourceSnapshot(db, 'cursor', TRANSCRIPT, again(estimate), 'larger')).toBe(true)
+    expect(replaceSourceSnapshot(db, 'codebuddy', CONVERSATION, again(snapshot), 'later')).toBe(true)
+
+    expect([line, estimate, snapshot].map(r => stored(r.id).updated_at)).toEqual(versions)
+    expect(getUnsyncedRecords(db, 'cloud', DEVICE)).toEqual([])
+    expect(await cloudSync()).toMatchObject({ status: 'ok', uploadedCount: 0, retiredCount: 0 })
+    expect(tombstonesSent).toEqual([])
+  })
+
   it('does not retract a CodeBuddy conversation that is imported again under its new id', async () => {
     const old = oldConversation(T0, 1000, T0 + 500)
     insertRecord(db, old)
