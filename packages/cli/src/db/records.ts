@@ -433,6 +433,8 @@ export interface RecordCopy {
    */
   sourceFile?: string
   lineOffset?: number
+  /** The ids of the calls the copy held when this parse folded it. */
+  callIds?: ReadonlySet<string>
 }
 
 /** The record ids of one parse: see `recordIdsForReread`. */
@@ -475,6 +477,7 @@ export function recordIdsForReread(db: Database.Database, deviceInstanceId: stri
     SELECT source_file, line_offset FROM records
     WHERE id = ? AND ${LOCAL_RECORDS_WHERE} AND device_instance_id IN (?, '${UNKNOWN_DEVICE_INSTANCE_ID}')
   `)
+  const callsOf = db.prepare('SELECT id FROM tool_calls WHERE record_id = ?')
   // Every line of a message, and every pass over a line before the
   // watermark, asks for the same id: answer each seed once per parse.
   const resolved = new Map<string, string>()
@@ -491,9 +494,11 @@ export function recordIdsForReread(db: Database.Database, deviceInstanceId: stri
         result = sentinelId
         const copy: RecordCopy = { id }
         const place = stored.get(id, deviceInstanceId) as { source_file: string; line_offset: number } | undefined
+        const callIds = place ? new Set((callsOf.all(id) as Array<{ id: string }>).map(row => row.id)) : undefined
         if (place && foldRecordCopy(db, id, sentinelId)) {
           copy.sourceFile = place.source_file
           copy.lineOffset = place.line_offset
+          copy.callIds = callIds
         }
         copies.set(sentinelId, copy)
       }

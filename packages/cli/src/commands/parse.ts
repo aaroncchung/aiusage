@@ -930,9 +930,14 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
               // is still stored at this very line by such a release. Once
               // this release has written the record from a line, that line's
               // calls are stored under their block-keyed ids, and any old row
-              // still there was kept from somewhere else.
-              const fromStoredLine = storedLines.get(tc.recordId!) === lineOffset && !toolCallExists.get(tc.id)
-              deletePositionalCounterpart(db, tc, fromStoredLine)
+              // still there was kept from somewhere else. That holds for this
+              // block wherever it was written from: a block already stored
+              // under its block-keyed id replaces nothing, so a log read in
+              // full again (a later one-time re-import) leaves alone an old
+              // row of another block with the same name, timestamp and index.
+              const storedByBlock = toolCallExists.get(tc.id) !== undefined
+              const fromStoredLine = storedLines.get(tc.recordId!) === lineOffset && !storedByBlock
+              if (!storedByBlock) deletePositionalCounterpart(db, tc, fromStoredLine)
             }
             if (tc.recordId) deleteAdoptedToolCall(db, tc, recordIds.copyOf(tc.recordId), filePath, lineOffset)
             insertToolCall(db, tc)

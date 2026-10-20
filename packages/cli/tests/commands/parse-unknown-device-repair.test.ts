@@ -371,7 +371,7 @@ describe('recordIdsForReread', () => {
 
     const reread = recordIdsForReread(db, DEVICE)
     expect(reread.recordId('m', 0)).toBe(sentinel('m', 0))
-    expect(reread.copyOf(sentinel('m', 0))).toEqual({ id: own('m', 0), sourceFile: '/p/s.jsonl', lineOffset: 3 })
+    expect(reread.copyOf(sentinel('m', 0))).toEqual({ id: own('m', 0), sourceFile: '/p/s.jsonl', lineOffset: 3, callIds: new Set() })
 
     expect(ids('claude-code')).toEqual([sentinel('m', 0)])
     expect(wire).toBe(generateSyncRecordId(DEVICE, '/p/s.jsonl', 3))

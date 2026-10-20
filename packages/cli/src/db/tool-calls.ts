@@ -80,25 +80,26 @@ export function deletePositionalCounterpart(db: Database.Database, tc: ToolCallR
  * A copy written before calls were keyed on their block (v1.5.22) holds the
  * calls of the line it was stored from under positional ids. Another block
  * of the message can share a call's name, timestamp and index, so such a row
- * is this call only when `tc` comes from that very line and the copy was not
- * written from it again since under block-keyed ids (after which a
- * positional row was kept from somewhere else): the rules
- * `deletePositionalCounterpart` follows for the record's own rows. Returns
+ * is this call only when `tc` comes from that very line and the copy did not
+ * hold this block under its block-keyed id when it was folded (`callIds`):
+ * if it did, a release keying calls on their block wrote the copy from that
+ * line since, and the positional row was kept from somewhere else. These are
+ * the rules the record's own positional rows follow in `runParse`. Returns
  * the number of rows deleted.
  */
 export function deleteAdoptedToolCall(
   db: Database.Database,
   tc: ToolCallRecord,
-  copy: { id: string; sourceFile?: string; lineOffset?: number } | undefined,
+  copy: { id: string; sourceFile?: string; lineOffset?: number; callIds?: ReadonlySet<string> } | undefined,
   sourceFile: string,
   lineOffset: number,
 ): number {
   if (!tc.recordId || !copy || !tc.blockKey) return 0
   const blockKeyed = generateBlockToolCallId(copy.id, tc.blockKey)
-  const writtenByBlock = db.prepare('SELECT 1 FROM tool_calls WHERE id = ? AND record_id = ?').get(blockKeyed, tc.recordId) !== undefined
   const remove = db.prepare('DELETE FROM tool_calls WHERE id = ? AND record_id = ?')
   let deleted = remove.run(blockKeyed, tc.recordId).changes
-  if (!writtenByBlock && copy.sourceFile === sourceFile && copy.lineOffset === lineOffset) {
+  const fromCopyLine = copy.sourceFile === sourceFile && copy.lineOffset === lineOffset
+  if (fromCopyLine && copy.callIds !== undefined && !copy.callIds.has(blockKeyed)) {
     const names = tc.name.startsWith('skill__') ? [tc.name, 'Skill', 'skill__unknown'] : [tc.name]
     for (const name of new Set(names)) {
       deleted += remove.run(generateToolCallId(copy.id, name, tc.ts, tc.callIndex), tc.recordId).changes

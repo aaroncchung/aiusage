@@ -214,6 +214,27 @@ describe('folding a Claude Code copy into its original', () => {
     expect(calls()).toEqual([generateBlockToolCallId(ORIGINAL, 'b2'), generateToolCallId(COPY, 'Read', Date.parse(ts), 0)].sort())
   })
 
+  it('keeps that positional call when another transcript writes the block first', async () => {
+    const ts = '2026-09-01T00:00:00Z'
+    write('b.jsonl', [line(ts, 6, 'b2')])
+    await runParse(db, 'claude-code')
+    giveDevice()
+    await storeAgainAsV1523(async () => {
+      unlinkSync(watermarkPath)
+      await runParse(db, 'claude-code')
+    })
+    db.prepare('INSERT INTO tool_calls (id, record_id, name, ts, call_index) VALUES (?, ?, ?, ?, 0)')
+      .run(generateToolCallId(COPY, 'Read', Date.parse(ts), 0), COPY, 'Read', Date.parse(ts))
+    // A resumed transcript, read before the copy's own, also holds b2.
+    write('a.jsonl', [line(ts, 6, 'b2')])
+    setClaudeCodeParserVersion(1)
+
+    await runParse(db, 'claude-code')
+
+    expect(stored()).toMatchObject({ id: ORIGINAL, source_file: join(project, 'b.jsonl') })
+    expect(calls()).toEqual([generateBlockToolCallId(ORIGINAL, 'b2'), generateToolCallId(COPY, 'Read', Date.parse(ts), 0)].sort())
+  })
+
   it('does not retract the wire id the original moves onto', async () => {
     // The message's first block was read before v1.5.22...
     const file = write('a.jsonl', [line('2026-09-01T00:00:00Z', 5, 'b1')])
@@ -242,5 +263,27 @@ describe('folding a Claude Code copy into its original', () => {
     expect(pushes.flatMap(c => c[0].map(r => r.id))).toEqual([copyWireId])
     expect(pushes.flatMap(c => c[1].map(t => t.record_id))).not.toContain(copyWireId)
     expect(getRetiredWireIds(db, 'cloud')).toEqual([])
+  })
+})
+describe('an installation that always had its device id', () => {
+  it('keeps both of two calls that share name, timestamp and index when its logs are read again', async () => {
+    // Parallel calls of one message: b1 came from a transcript that is gone,
+    // under the positional id of an earlier release; b2 was read by v1.5.23
+    // after its one-time re-import, under its block-keyed id.
+    const ts = '2026-09-01T00:00:00Z'
+    // Its record has the device-seeded id from the start.
+    const OWN = generateRecordId(DEVICE, 'm1', 0)
+    giveDevice()
+    write('a.jsonl', [line(ts, 6, 'b2')])
+    await runParse(db, 'claude-code')
+    db.prepare('INSERT INTO tool_calls (id, record_id, name, ts, call_index) VALUES (?, ?, ?, ?, 0)')
+      .run(generateToolCallId(OWN, 'Read', Date.parse(ts), 0), OWN, 'Read', Date.parse(ts))
+    setClaudeCodeParserVersion(1)
+    const before = calls()
+    expect(before).toHaveLength(2)
+
+    await runParse(db, 'claude-code')
+
+    expect(calls()).toEqual(before)
   })
 })
