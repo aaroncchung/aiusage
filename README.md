@@ -206,7 +206,7 @@ Thanks to these wonderful people ([emoji key](https://allcontributors.org/en/ref
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/lmingde"><img src="https://avatars.githubusercontent.com/u/38581341?v=4?s=100" width="100px;" alt="Mingde"/><br /><sub><b>Mingde</b></sub></a><br /><a href="https://github.com/juliantanx/aiusage/issues?q=author%3Almingde" title="Bug reports">🐛</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Ntrxi"><img src="https://avatars.githubusercontent.com/u/121737839?v=4?s=100" width="100px;" alt="Aaron C"/><br /><sub><b>Aaron C</b></sub></a><br /><a href="https://github.com/juliantanx/aiusage/commits?author=Ntrxi" title="Code">💻</a> <a href="https://github.com/juliantanx/aiusage/commits?author=Ntrxi" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/aaroncchung"><img src="https://avatars.githubusercontent.com/u/121737839?v=4?s=100" width="100px;" alt="Aaron C"/><br /><sub><b>Aaron C</b></sub></a><br /><a href="https://github.com/juliantanx/aiusage/commits?author=aaroncchung" title="Code">💻</a> <a href="https://github.com/juliantanx/aiusage/commits?author=aaroncchung" title="Documentation">📖</a></td>
     </tr>
   </tbody>
 </table>
