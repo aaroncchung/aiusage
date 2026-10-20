@@ -233,10 +233,11 @@ function normalizeKiroModel(value: unknown): string {
  * importer reads such a record again, and the first complete read replaces
  * whatever is stored.
  *
- * A record that has not changed is left as it is (`insertChangedRecords`).
  * Returns how many records were added or changed and how many tool calls
  * were stored that were not stored before, so a row read again unchanged is
- * not counted as parsed again.
+ * not counted as parsed again. A record has changed when `insertRecord`
+ * moved its `updated_at`. Unlike `insertChangedRecords`, that also counts
+ * `source_file`, in which Hermes keeps the session title.
  */
 function insertRecordsWithToolCalls(
   db: Database.Database,
@@ -245,13 +246,17 @@ function insertRecordsWithToolCalls(
   incompleteRecordIds: string[],
 ): { records: number; toolCalls: number } {
   const incomplete = new Set(incompleteRecordIds)
+  const storedVersion = db.prepare('SELECT updated_at FROM records WHERE id = ?').pluck()
   const storedToolCallIds = db.prepare('SELECT id FROM tool_calls WHERE record_id = ?').pluck()
   const removeToolCalls = db.prepare('DELETE FROM tool_calls WHERE record_id = ?')
   return db.transaction(() => {
-    const written = insertChangedRecords(db, records)
+    let written = 0
     const kept = new Set<string>()
     const replaced = new Set<string>()
     for (const record of records) {
+      const before = storedVersion.get(record.id)
+      insertRecord(db, record)
+      if (before === undefined || storedVersion.get(record.id) !== before) written++
       const stored = storedToolCallIds.all(record.id) as string[]
       if (incomplete.has(record.id) && stored.length > 0) {
         kept.add(record.id)

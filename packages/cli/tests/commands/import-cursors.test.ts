@@ -945,6 +945,27 @@ describe('runParse counts only what a run adds or changes', () => {
     expect(cache.prepare('SELECT COUNT(*) FROM tool_calls').pluck().get()).toBe(3)
   })
 
+  it('for a Hermes session that gets its title when it ends', async () => {
+    const hermes = sourceDb('state.db', HERMES_SCHEMA)
+    hermes.prepare('INSERT INTO sessions (id, model, started_at, ended_at, input_tokens, output_tokens) VALUES (?, ?, ?, ?, ?, ?)').run('open', 'gpt-4o', 100, null, 1000, 100)
+    const options = { hermesDbPath: join(dir, 'state.db') }
+    const target = 'cloud:https://sync.example.test'
+    const row = () => cache.prepare("SELECT id, source_file, updated_at FROM records WHERE tool = 'hermes'").get() as { id: string; source_file: string; updated_at: number }
+
+    expect(counts(await runParse(cache, 'hermes', options))).toEqual([1, 0])
+    const first = row()
+    markRecordVersionsSynced(cache, [{ id: first.id, updatedAt: first.updated_at }], target)
+    expect(counts(await runParse(cache, 'hermes', options))).toEqual([0, 0])
+    expect(getUnsyncedRecords(cache, target, DEVICE)).toEqual([])
+
+    // The usage stays the same; the title, which the record keeps in its
+    // source file, is new.
+    hermes.prepare('UPDATE sessions SET title = ?, ended_at = ? WHERE id = ?').run('Fix the build', 200, 'open')
+    expect(counts(await runParse(cache, 'hermes', options))).toEqual([1, 0])
+    expect(row()).toMatchObject({ id: first.id, source_file: `${join(dir, 'state.db')}:session:open:Fix the build` })
+    expect(getUnsyncedRecords(cache, target, DEVICE).map(r => r.id)).toEqual([first.id])
+  })
+
   it('for Cursor conversations, Goose sessions, Kilo messages and Trae sessions that are read again', async () => {
     const cursorDb = sourceDb('state.vscdb', CURSOR_SCHEMA)
     const putKv = (key: string, value: unknown) =>
