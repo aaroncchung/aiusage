@@ -41,6 +41,7 @@ const CURRENT_CODEFUSE_PARSER_VERSION = 3
  * into the record it copies, which gets the calls.
  */
 const CURRENT_CLAUDE_CODE_PARSER_VERSION = 2
+
 /**
  * v1: the OpenCode cursor no longer moves past a message that is still being
  * written, and Kilo no longer shares it (issues #82, #83). The cursor is reset
@@ -115,10 +116,8 @@ export interface WatermarkState {
   antigravityParserVersion?: number
   codefuseParserVersion?: number
   claudeCodeParserVersion?: number
-  opencodeParserVersion?: number
   toolCallBackfillVersion?: number
   opencode?: OpenCodeCursor | null
-  kilo?: OpenCodeCursor | null
   hermes?: HermesCursor | null
   qoder?: QoderCursor | null
   cursor?: CursorCursor | null
@@ -129,6 +128,10 @@ export interface WatermarkState {
   zcodeTools?: ZcodeToolCursor | null
   trae?: number | null
   codebuddyIde?: number | null
+
+  opencodeParserVersion?: number
+  /** Kilo's own cursor; kilo.db used to be read from `opencode`. */
+  kilo?: OpenCodeCursor | null
 }
 
 /** @deprecated Use FileWatermarkData instead */
@@ -142,6 +145,7 @@ function defaultState(): WatermarkState {
     antigravityParserVersion: CURRENT_ANTIGRAVITY_PARSER_VERSION,
     codefuseParserVersion: CURRENT_CODEFUSE_PARSER_VERSION,
     claudeCodeParserVersion: CURRENT_CLAUDE_CODE_PARSER_VERSION,
+
     opencodeParserVersion: CURRENT_OPENCODE_PARSER_VERSION,
   }
 }
@@ -205,10 +209,8 @@ export class WatermarkManager {
           antigravityParserVersion: parsed.antigravityParserVersion,
           codefuseParserVersion: parsed.codefuseParserVersion,
           claudeCodeParserVersion: parsed.claudeCodeParserVersion,
-          opencodeParserVersion: parsed.opencodeParserVersion,
           toolCallBackfillVersion: parsed.toolCallBackfillVersion,
           opencode: parsed.opencode ?? null,
-          kilo: parsed.kilo ?? null,
           hermes: parsed.hermes ?? null,
           qoder: parsed.qoder ?? null,
           cursor: parsed.cursor ?? null,
@@ -219,6 +221,9 @@ export class WatermarkManager {
           zcodeTools: parsed.zcodeTools ?? null,
           trae: parsed.trae ?? null,
           codebuddyIde: parsed.codebuddyIde ?? null,
+
+          opencodeParserVersion: parsed.opencodeParserVersion,
+          kilo: parsed.kilo ?? null,
         }
       }
 
@@ -253,6 +258,7 @@ export class WatermarkManager {
         state.files['claude-code'] = {}
         state.claudeCodeParserVersion = CURRENT_CLAUDE_CODE_PARSER_VERSION
       }
+
       if ((state.opencodeParserVersion ?? 0) < CURRENT_OPENCODE_PARSER_VERSION) {
         // v1: the cursor moved past messages whose tokens were not written
         // yet, and the Kilo import moved it past OpenCode messages it had
