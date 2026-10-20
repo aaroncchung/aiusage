@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
-import type { RecordOrigin, StatsRecord, Tool } from '@aiusage/core'
-import { generateSyncRecordId } from '@aiusage/core'
-import { usesGeneratedWireId } from '../sync/mapper.js'
+import type { RecordIdBuilder, RecordOrigin, StatsRecord, Tool } from '@aiusage/core'
+import { generateRecordId, generateSyncRecordId } from '@aiusage/core'
+import { mapStatsRecordToSyncRecord, usesGeneratedWireId } from '../sync/mapper.js'
 
 /**
  * Sentinel device id used by parsers that ran before `state.json` existed.
@@ -417,6 +417,149 @@ export function backfillUnknownDeviceInstanceId(db: Database.Database, deviceIns
         `).run(deviceInstanceId)
     return result.changes
   })()
+}
+
+/**
+ * Builds the record ids of a parse, for every importer: any of them can read
+ * a record it has stored before (a one-time re-import, a file or database
+ * that is read in full again, a lost watermark).
+ *
+ * A row parsed while the installation had no device id (before v1.5.22, every
+ * installation without sync) was stored under the id built from the
+ * `'unknown'` sentinel, and keeps that id when
+ * `backfillUnknownDeviceInstanceId` relabels it. Built from the device's own
+ * id, the same record read again would get a second id and be stored twice.
+ * This returns the sentinel's id while a local row of this device is stored
+ * under it, and the device's own id otherwise.
+ *
+ * A record that is stored under both ids was stored twice by a release
+ * without this lookup, and the row under the device's own id is the copy: it
+ * is folded into the original and deleted when the lookup finds it (see
+ * `foldRecordCopy`), before the caller writes what it has just read.
+ */
+export function recordIdForReread(db: Database.Database, deviceInstanceId: string): RecordIdBuilder {
+  if (!deviceInstanceId || deviceInstanceId === UNKNOWN_DEVICE_INSTANCE_ID) {
+    return (seed, offset) => generateRecordId(deviceInstanceId, seed, offset)
+  }
+  const stored = db.prepare(`
+    SELECT 1 FROM records
+    WHERE id = ? AND ${LOCAL_RECORDS_WHERE} AND device_instance_id IN (?, '${UNKNOWN_DEVICE_INSTANCE_ID}')
+  `)
+  // Every line of a message, and every pass over a line before the
+  // watermark, asks for the same id: answer each seed once per parse.
+  const resolved = new Map<string, string>()
+  return (seed, offset) => {
+    const key = `${seed}\0${offset}`
+    const known = resolved.get(key)
+    if (known !== undefined) return known
+    const id = generateRecordId(deviceInstanceId, seed, offset)
+    const sentinelId = generateRecordId(UNKNOWN_DEVICE_INSTANCE_ID, seed, offset)
+    let result = id
+    if (stored.get(sentinelId, deviceInstanceId)) {
+      result = sentinelId
+      if (stored.get(id, deviceInstanceId)) foldRecordCopy(db, id, sentinelId)
+    }
+    resolved.set(key, result)
+    return result
+  }
+}
+
+/**
+ * Folds `copyId`, a second row of the record stored under `originalId`, into
+ * the original and deletes it. Only call this with proof that both rows are
+ * one record, such as both ids being built from the same seed.
+ *
+ * The copy was written by the later read, so its measurements replace the
+ * original's (`insertRecord` moves `updated_at` only when they differ). The
+ * original keeps its id, its place in its source (`source_file`,
+ * `line_offset`, `session_id`), its import time and its sync state, which can
+ * be older than the copy. The copy's tool calls and sync state go with it.
+ * A sync target that acknowledged the copy under a wire id that no remaining
+ * row publishes gets that id retired, as migration v14 retires ids: the cloud
+ * receives a tombstone, and a file target leaves the copy out of its next
+ * snapshot. Returns false, changing nothing, unless both rows are local.
+ */
+export function foldRecordCopy(db: Database.Database, copyId: string, originalId: string): boolean {
+  return db.transaction(() => {
+    const copy = getRecordById(db, copyId)
+    const original = getRecordById(db, originalId)
+    if (!copy || !original || copyId === originalId) return false
+    if (copy.origin !== 'local' || original.origin !== 'local') return false
+
+    insertRecord(db, {
+      ...original,
+      ts: copy.ts,
+      model: copy.model,
+      provider: copy.provider,
+      inputTokens: copy.inputTokens,
+      outputTokens: copy.outputTokens,
+      cacheReadTokens: copy.cacheReadTokens,
+      cacheWriteTokens: copy.cacheWriteTokens,
+      thinkingTokens: copy.thinkingTokens,
+      cost: copy.cost,
+      costSource: copy.costSource,
+    })
+
+    const targets = (db.prepare('SELECT target FROM sync_record_state WHERE record_id = ?').all(copyId) as Array<{ target: string }>)
+      .map(row => row.target)
+    const wireId = mapStatsRecordToSyncRecord(copy).id
+    db.prepare('DELETE FROM records WHERE id = ?').run(copyId)
+    if (targets.length > 0 && !isWireIdPublished(db, wireId, copy.deviceInstanceId, copy)) {
+      const retire = db.prepare('INSERT OR IGNORE INTO sync_retired_wire_ids (target, wire_id) VALUES (?, ?)')
+      for (const target of targets) retire.run(target, wireId)
+    }
+    return true
+  })()
+}
+
+/**
+ * True when a local row is published under `wireId`. Only a row with that id
+ * or one at the same place in the same source can be. A row still labelled
+ * `'unknown'` is published under `deviceInstanceId` once it is relabelled.
+ */
+function isWireIdPublished(
+  db: Database.Database,
+  wireId: string,
+  deviceInstanceId: string,
+  near: Pick<StatsRecord, 'sourceFile' | 'lineOffset'>,
+): boolean {
+  const rows = db.prepare(`
+    SELECT * FROM records
+    WHERE ${LOCAL_RECORDS_WHERE} AND (id = ? OR (source_file = ? AND line_offset = ?))
+  `).all(wireId, near.sourceFile, near.lineOffset) as Record<string, unknown>[]
+  return rows.some((row) => {
+    const record = mapRowToRecord(row)
+    const publishedAs = record.deviceInstanceId === UNKNOWN_DEVICE_INSTANCE_ID ? deviceInstanceId : record.deviceInstanceId
+    return mapStatsRecordToSyncRecord({ ...record, deviceInstanceId: publishedAs }).id === wireId
+  })
+}
+
+/**
+ * Records stored twice, once under the `'unknown'` sentinel's id and once
+ * under the device's own, whose ids are built from their source file and
+ * line (most JSONL logs: Codex, CodeFuse's embedded Codex, Copilot, OpenClaw,
+ * Qoder and the generic logs). Both ids can be rebuilt from the stored
+ * columns, so such a copy is proven without reading its source, which may be
+ * gone. Each copy is folded into its original (`foldRecordCopy`). Returns the
+ * number of copies removed.
+ */
+export function foldLineSeededRecordCopies(db: Database.Database): number {
+  const rows = db.prepare(`
+    SELECT id, device_instance_id, source_file, line_offset FROM records
+    WHERE ${LOCAL_RECORDS_WHERE} AND device_instance_id != '${UNKNOWN_DEVICE_INSTANCE_ID}'
+  `).all() as Array<{ id: string; device_instance_id: string; source_file: string; line_offset: number }>
+  const stored = db.prepare(`
+    SELECT 1 FROM records
+    WHERE id = ? AND ${LOCAL_RECORDS_WHERE} AND device_instance_id IN (?, '${UNKNOWN_DEVICE_INSTANCE_ID}')
+  `)
+  let folded = 0
+  for (const row of rows) {
+    if (row.id !== generateRecordId(row.device_instance_id, row.source_file, row.line_offset)) continue
+    const originalId = generateRecordId(UNKNOWN_DEVICE_INSTANCE_ID, row.source_file, row.line_offset)
+    if (!stored.get(originalId, row.device_instance_id)) continue
+    if (foldRecordCopy(db, row.id, originalId)) folded++
+  }
+  return folded
 }
 
 /**

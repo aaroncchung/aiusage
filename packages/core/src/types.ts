@@ -115,6 +115,14 @@ export interface ParsedLine {
   toolCalls?: Array<{ name: string; ts: number; callIndex: number }>
 }
 
+/**
+ * Builds the id a record is stored under from the key and number that
+ * identify it in its source, as `generateRecordId(deviceInstanceId, seed,
+ * offset)` does by default. A caller passes its own to keep the id a record
+ * was first stored under (see `recordIdFor`).
+ */
+export type RecordIdBuilder = (seed: string, offset: number) => string
+
 export interface ParseContext {
   sourceFile: string
   lineOffset: number
@@ -125,6 +133,7 @@ export interface ParseContext {
   deviceInstanceId: string
   platform?: string                    // 'win32' | 'darwin' | 'linux'
   exchangeRate?: number               // CNY→USD rate for cost calculation
+  recordId?: RecordIdBuilder           // Builds record ids; see recordIdFor
 }
 
 export interface ParseResult {

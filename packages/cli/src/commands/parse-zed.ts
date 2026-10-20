@@ -1,12 +1,14 @@
 import type Database from 'better-sqlite3'
 import type { StatsRecord } from '@aiusage/core'
-import { calculateCost, generateRecordId, inferProvider } from '@aiusage/core'
+import { calculateCost, inferProvider, recordIdFor, type RecordIdBuilder } from '@aiusage/core'
 import type { TimestampIdCursor } from '../watermark.js'
 
 export interface ZedImportOptions {
   dbPath: string
   device: string
   deviceInstanceId: string
+  /** Builds record ids (see recordIdFor); runParse passes recordIdForReread. */
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   cursor: TimestampIdCursor | null
@@ -111,7 +113,7 @@ export function runParseZed(db: Database.Database, options: ZedImportOptions): Z
     const cost = model !== 'unknown' ? calculateCost(model, { ...usage, thinkingTokens: 0 }, exchangeRate) : 0
     const recordTs = parseTs(row.created_at || row.updated_at, now)
     records.push({
-      id: generateRecordId(deviceInstanceId, `${dbPath}:${row.id}`, recordTs),
+      id: recordIdFor(options, `${dbPath}:${row.id}`, recordTs),
       ts: recordTs,
       ingestedAt: now,
       updatedAt: now,

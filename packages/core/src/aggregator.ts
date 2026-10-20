@@ -1,4 +1,4 @@
-import type { Tool, ParseContext, ParseResult } from './types.js'
+import type { Tool, ParseContext, ParseResult, RecordIdBuilder } from './types.js'
 import type { Parser } from './parsers/index.js'
 import { ClaudeCodeParser } from './parsers/claude-code.js'
 import { CodexParser } from './parsers/codex.js'
@@ -18,6 +18,7 @@ export interface CreateContextOptions {
   deviceInstanceId: string
   platform?: string
   exchangeRate?: number
+  recordId?: RecordIdBuilder
 }
 
 export class Aggregator {

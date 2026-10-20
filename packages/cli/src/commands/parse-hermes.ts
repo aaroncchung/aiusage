@@ -1,12 +1,14 @@
 import type Database from 'better-sqlite3'
 import type { StatsRecord, ToolCallRecord } from '@aiusage/core'
-import { generateRecordId, generateToolCallId, inferProvider, calculateCost } from '@aiusage/core'
+import { generateToolCallId, inferProvider, calculateCost, recordIdFor, type RecordIdBuilder } from '@aiusage/core'
 import type { HermesCursor } from '../watermark.js'
 
 export interface HermesImportOptions {
   dbPath: string
   device: string
   deviceInstanceId: string
+  /** Builds record ids (see recordIdFor); runParse passes recordIdForReread. */
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   cursor: HermesCursor | null
@@ -114,7 +116,7 @@ export function runParseHermes(
       costSource = 'unknown'
     }
 
-    const recordId = generateRecordId(deviceInstanceId, dbPath + ':' + session.id, ts)
+    const recordId = recordIdFor(options, dbPath + ':' + session.id, ts)
 
     // Use a per-session sourceFile so project extraction can differentiate sessions.
     // Format: /path/to/state.db:session:<id>:<title>

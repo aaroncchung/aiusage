@@ -1,12 +1,14 @@
 import type Database from 'better-sqlite3'
 import type { StatsRecord } from '@aiusage/core'
-import { calculateCost, generateRecordId, inferProvider } from '@aiusage/core'
+import { calculateCost, inferProvider, recordIdFor, type RecordIdBuilder } from '@aiusage/core'
 import type { TimestampIdCursor } from '../watermark.js'
 
 export interface KiroImportOptions {
   dbPath: string
   device: string
   deviceInstanceId: string
+  /** Builds record ids (see recordIdFor); runParse passes recordIdForReread. */
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   cursor: TimestampIdCursor | null
@@ -63,6 +65,7 @@ function recordFromParts(options: {
   sessionId: string
   device: string
   deviceInstanceId: string
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   exchangeRate?: number
@@ -71,7 +74,7 @@ function recordFromParts(options: {
   const tokenArgs = { inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, thinkingTokens: 0 }
   const cost = calculateCost(model, tokenArgs, exchangeRate)
   return {
-    id: generateRecordId(deviceInstanceId, `${dbPath}:${sourceId}`, recordTs),
+    id: recordIdFor(options, `${dbPath}:${sourceId}`, recordTs),
     ts: recordTs,
     ingestedAt: now,
     updatedAt: now,
@@ -122,6 +125,7 @@ function parseTokensGenerated(db: Database.Database, options: KiroImportOptions)
       sessionId: String(row.id),
       device,
       deviceInstanceId,
+      recordId: options.recordId,
       platform,
       now,
       exchangeRate,
@@ -173,6 +177,7 @@ function parseConversationsV2(db: Database.Database, options: KiroImportOptions)
         sessionId: String(row.conversation_id ?? 'unknown'),
         device,
         deviceInstanceId,
+        recordId: options.recordId,
         platform,
         now,
         exchangeRate,

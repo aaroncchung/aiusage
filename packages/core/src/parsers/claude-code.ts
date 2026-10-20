@@ -1,6 +1,6 @@
 import type { Parser, ParseResult, ParseContext } from '../types.js'
 import type { StatsRecord, ToolCallRecord, Tool } from '../types.js'
-import { generateRecordId, generateBlockToolCallId } from '../record-id.js'
+import { recordIdFor, generateBlockToolCallId } from '../record-id.js'
 import { inferProvider } from '../provider.js'
 import { calculateCost } from '../pricing.js'
 
@@ -83,8 +83,8 @@ export class ClaudeCodeParser implements Parser {
     const messageId = parsed.message.id
     const record: StatsRecord = {
       id: messageId
-        ? generateRecordId(context.deviceInstanceId, messageId, 0)
-        : generateRecordId(context.deviceInstanceId, context.sourceFile, context.lineOffset),
+        ? recordIdFor(context, messageId, 0)
+        : recordIdFor(context, context.sourceFile, context.lineOffset),
       ts,
       ingestedAt: context.now,
       updatedAt: context.now,

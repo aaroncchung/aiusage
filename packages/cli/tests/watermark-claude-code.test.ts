@@ -52,7 +52,7 @@ describe('WatermarkManager Claude Code parser version', () => {
     expect(wm.getOpenCodeCursor()).toEqual({ lastMessageCreatedAt: 5, lastMessageId: 'm' })
 
     wm.save()
-    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).claudeCodeParserVersion).toBe(1)
+    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).claudeCodeParserVersion).toBe(2)
   })
 
   it('clears the entries once: a watermark saved by this version keeps them', () => {
@@ -80,6 +80,6 @@ describe('WatermarkManager Claude Code parser version', () => {
     const wm = new WatermarkManager(watermarkPath)
     wm.save()
 
-    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).claudeCodeParserVersion).toBe(1)
+    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).claudeCodeParserVersion).toBe(2)
   })
 })

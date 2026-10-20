@@ -2,9 +2,9 @@ import Database from 'better-sqlite3'
 import { readFileSync, statSync, existsSync, openSync, readSync, closeSync } from 'node:fs'
 import { basename, join, dirname } from 'node:path'
 import { hostname } from 'node:os'
-import { Aggregator, resolveExchangeRate, generateToolCallId, claudeCodeToolCall, inferProvider, calculateCost, resolvePrice, generateRecordId, normalizeCodeFuseModel, parseTimestamp, type StatsRecord, type Tool } from '@aiusage/core'
+import { Aggregator, resolveExchangeRate, generateToolCallId, claudeCodeToolCall, inferProvider, calculateCost, resolvePrice, recordIdFor, normalizeCodeFuseModel, parseTimestamp, type RecordIdBuilder, type StatsRecord, type Tool } from '@aiusage/core'
 import type { ToolCallRecord } from '@aiusage/core'
-import { insertChangedRecords, insertRecord, LOCAL_RECORDS_WHERE, backfillUnknownDeviceInstanceId } from '../db/records.js'
+import { insertChangedRecords, insertRecord, LOCAL_RECORDS_WHERE, backfillUnknownDeviceInstanceId, recordIdForReread } from '../db/records.js'
 import { insertToolCall, deletePositionalCounterpart, hasPositionalToolCallId } from '../db/tool-calls.js'
 import { getState } from '../init.js'
 import { loadConfig, AIUSAGE_DIR } from '../config.js'
@@ -127,6 +127,7 @@ function parseUiMessagesFile(options: {
   tool: 'roocode' | 'kilocode'
   device: string
   deviceInstanceId: string
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   exchangeRate?: number
@@ -171,7 +172,7 @@ function parseUiMessagesFile(options: {
       ? payload.inferenceProvider.trim().toLowerCase()
       : inferProvider(model)
     const ts = typeof message.ts === 'number' ? message.ts : now
-    const recordId = generateRecordId(deviceInstanceId, `${filePath}:${index}`, ts)
+    const recordId = recordIdFor(options, `${filePath}:${index}`, ts)
     const tokenArgs = { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, thinkingTokens }
     const calculatedCost = model !== 'unknown' ? calculateCost(model, tokenArgs, exchangeRate) : 0
     const logCost = Number(payload.cost)
@@ -215,12 +216,14 @@ function normalizeKiroModel(value: unknown): string {
     .replace(/-\d{8}-v\d+(?:-\d+)?$/i, '')
 }
 
-function codeFuseSnapshotRecordId(deviceInstanceId: string, sessionId: string): string {
-  return generateRecordId(deviceInstanceId, `codefuse:snapshot:${sessionId}`, 0)
+type RecordIds = { deviceInstanceId: string; recordId?: RecordIdBuilder }
+
+function codeFuseSnapshotRecordId(ids: RecordIds, sessionId: string): string {
+  return recordIdFor(ids, `codefuse:snapshot:${sessionId}`, 0)
 }
 
-function deleteCodeFuseSnapshotFallback(db: Database.Database, deviceInstanceId: string, sessionId: string): void {
-  const recordId = codeFuseSnapshotRecordId(deviceInstanceId, sessionId)
+function deleteCodeFuseSnapshotFallback(db: Database.Database, ids: RecordIds, sessionId: string): void {
+  const recordId = codeFuseSnapshotRecordId(ids, sessionId)
   db.prepare('DELETE FROM tool_calls WHERE record_id = ?').run(recordId)
   db.prepare("DELETE FROM records WHERE id = ? AND tool = 'codefuse'").run(recordId)
 }
@@ -230,6 +233,7 @@ function parseCodeFuseSnapshotFile(options: {
   filePath: string
   device: string
   deviceInstanceId: string
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   exchangeRate?: number
@@ -256,7 +260,7 @@ function parseCodeFuseSnapshotFile(options: {
     LIMIT 1
   `).get(sessionId)
   if (hasJsonlRecord) {
-    deleteCodeFuseSnapshotFallback(db, deviceInstanceId, sessionId)
+    deleteCodeFuseSnapshotFallback(db, options, sessionId)
     return { records, errors }
   }
 
@@ -285,7 +289,7 @@ function parseCodeFuseSnapshotFile(options: {
   const cost = hasPrice ? calculateCost(model, tokenArgs, exchangeRate) : 0
 
   records.push({
-    id: codeFuseSnapshotRecordId(deviceInstanceId, sessionId),
+    id: codeFuseSnapshotRecordId(options, sessionId),
     ts,
     ingestedAt: now,
     updatedAt: now,
@@ -323,6 +327,7 @@ function parseKiroSessionFile(options: {
   filePath: string
   device: string
   deviceInstanceId: string
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   exchangeRate?: number
@@ -340,7 +345,7 @@ function parseKiroSessionFile(options: {
 
   // Try workspace-sessions format: history[].promptLogs[]
   if (Array.isArray(parsed?.history) && !parsed?.session_state) {
-    return parseKiroWorkspaceSession({ filePath, parsed, device, deviceInstanceId, platform, now, exchangeRate })
+    return parseKiroWorkspaceSession({ filePath, parsed, device, deviceInstanceId, recordId: options.recordId, platform, now, exchangeRate })
   }
 
   const turns = parsed?.session_state?.conversation_metadata?.user_turn_metadatas
@@ -370,7 +375,7 @@ function parseKiroSessionFile(options: {
     const cost = calculateCost(model, tokenArgs, exchangeRate)
 
     records.push({
-      id: generateRecordId(deviceInstanceId, `${filePath}:${requestId}`, recordTs),
+      id: recordIdFor(options, `${filePath}:${requestId}`, recordTs),
       ts: recordTs,
       ingestedAt: now,
       updatedAt: now,
@@ -401,6 +406,7 @@ function parseKiroWorkspaceSession(options: {
   parsed: any
   device: string
   deviceInstanceId: string
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   exchangeRate?: number
@@ -473,7 +479,7 @@ function parseKiroWorkspaceSession(options: {
     const sourceId = `${sessionId}:${index}`
 
     records.push({
-      id: generateRecordId(deviceInstanceId, `${filePath}:${sourceId}`, recordTs),
+      id: recordIdFor(options, `${filePath}:${sourceId}`, recordTs),
       ts: recordTs,
       ingestedAt: now,
       updatedAt: now,
@@ -506,6 +512,14 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
   const device = config?.device || hostname() || state?.deviceInstanceId?.slice(0, 8) || 'unknown'
   const deviceInstanceId = state?.deviceInstanceId ?? 'unknown'
   const devicePlatform = config?.platform
+
+  // Rows parsed before this installation had a device id carry the 'unknown'
+  // sentinel, and their ids are built from it. They are relabelled before
+  // anything is read, and every record id below is built by
+  // recordIdForReread, so a record read again is written to the row it is
+  // stored under instead of being stored a second time.
+  backfillUnknownDeviceInstanceId(db, deviceInstanceId, device)
+  const recordId = recordIdForReread(db, deviceInstanceId)
 
   const watermarkPath = join(AIUSAGE_DIR, 'watermark.json')
   const wm = new WatermarkManager(watermarkPath)
@@ -541,6 +555,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
               dbPath: filePath,
               device,
               deviceInstanceId,
+              recordId,
               platform: devicePlatform,
               now: Date.now(),
               fallbackTs: stat.mtimeMs,
@@ -580,6 +595,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
             tool,
             device,
             deviceInstanceId,
+            recordId,
             platform: devicePlatform,
             now: Date.now(),
             exchangeRate,
@@ -605,6 +621,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
             filePath,
             device,
             deviceInstanceId,
+            recordId,
             platform: devicePlatform,
             now: Date.now(),
             exchangeRate,
@@ -629,6 +646,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
             filePath,
             device,
             deviceInstanceId,
+            recordId,
             platform: devicePlatform,
             now: Date.now(),
             exchangeRate,
@@ -670,9 +688,8 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
               const recordTs = stat.mtimeMs
               const tokenArgs = { inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, thinkingTokens: 0 }
               const cost = calculateCost(model, tokenArgs, exchangeRate)
-              const recordId = generateRecordId(deviceInstanceId, `${filePath}:${byteOffset}`, recordTs)
               const record: StatsRecord = {
-                id: recordId,
+                id: recordId(`${filePath}:${byteOffset}`, recordTs),
                 ts: recordTs,
                 ingestedAt: Date.now(),
                 updatedAt: Date.now(),
@@ -713,6 +730,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
             filePath,
             device,
             deviceInstanceId,
+            recordId,
             platform: devicePlatform,
             now: Date.now(),
             exchangeRate,
@@ -757,9 +775,8 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
             const recordTs = stat.mtimeMs
             const tokenArgs = { inputTokens: est.inputTextChars, outputTokens: est.outputTextChars, cacheReadTokens: 0, cacheWriteTokens: 0, thinkingTokens: 0 }
             const cost = calculateCost('cursor-composer', tokenArgs, exchangeRate)
-            const recordId = generateRecordId(deviceInstanceId, filePath, recordTs)
             const record: StatsRecord = {
-              id: recordId,
+              id: recordId(filePath, recordTs),
               ts: recordTs,
               ingestedAt: Date.now(),
               updatedAt: Date.now(),
@@ -844,6 +861,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
               sessionId,
               device,
               deviceInstanceId,
+              recordId,
               platform: devicePlatform,
               exchangeRate,
             }))
@@ -858,6 +876,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
             sessionId,
             device,
             deviceInstanceId,
+            recordId,
             platform: devicePlatform,
             exchangeRate,
           })
@@ -883,7 +902,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
         // record only together with the records of the log that replaces it.
         db.transaction(() => {
           if (tool === 'codefuse' && filePath.endsWith('.jsonl')) {
-            deleteCodeFuseSnapshotFallback(db, deviceInstanceId, sessionId)
+            deleteCodeFuseSnapshotFallback(db, { deviceInstanceId, recordId }, sessionId)
           }
           // Where each record was stored under this file before this pass.
           const storedLines = new Map<string, number>()
@@ -964,6 +983,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           dbPath: openCodeDbPath,
           device,
           deviceInstanceId,
+          recordId,
           platform: devicePlatform,
           now: Date.now(),
           cursor: wm.getOpenCodeCursor(),
@@ -998,6 +1018,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           dbPath: hermesDbPath,
           device,
           deviceInstanceId,
+          recordId,
           platform: devicePlatform,
           now: Date.now(),
           cursor: wm.getHermesCursor(),
@@ -1032,6 +1053,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           dbPath: qoderDbPath,
           device,
           deviceInstanceId,
+          recordId,
           platform: devicePlatform,
           now: Date.now(),
           cursor: wm.getQoderCursor(),
@@ -1067,6 +1089,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           dbPath: cursorDbPath,
           device,
           deviceInstanceId,
+          recordId,
           platform: devicePlatform,
           now: Date.now(),
           cursor: wm.getCursorCursor(),
@@ -1106,6 +1129,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           dbPath: kiloDbPath,
           device,
           deviceInstanceId,
+          recordId,
           platform: devicePlatform,
           now: Date.now(),
           cursor: wm.getOpenCodeCursor(),
@@ -1152,6 +1176,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           dbPath: gooseDbPath,
           device,
           deviceInstanceId,
+          recordId,
           platform: devicePlatform,
           now: Date.now(),
           cursor: wm.getGooseCursor(),
@@ -1183,6 +1208,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           dbPath: kiroDbPath,
           device,
           deviceInstanceId,
+          recordId,
           platform: devicePlatform,
           now: Date.now(),
           cursor: wm.getKiroCursor(),
@@ -1214,6 +1240,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           dbPath: zedDbPath,
           device,
           deviceInstanceId,
+          recordId,
           platform: devicePlatform,
           now: Date.now(),
           cursor: wm.getZedCursor(),
@@ -1246,6 +1273,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
             dbPath: zcodeDbPath,
             device,
             deviceInstanceId,
+            recordId,
             platform: devicePlatform,
             now: Date.now(),
             cursor: wm.getZcodeCursor(),
@@ -1286,6 +1314,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
       dbPath: traeDbPath,
       device,
       deviceInstanceId,
+      recordId,
       platform: devicePlatform,
       now: Date.now(),
       lastImportedAt: traeLastImported,
@@ -1311,6 +1340,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
         dataDir: codeBuddyIdeDir,
         device,
         deviceInstanceId,
+        recordId,
         platform: devicePlatform,
         now: Date.now(),
         cursor: cbCursor,
@@ -1328,10 +1358,6 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
       errors.push(`${codeBuddyIdeDir}: ${e instanceof Error ? e.message : e}`)
     }
   }
-
-  // Fix historical records that were parsed before init created state.json.
-  // If the current device UUID is known, backfill any records with 'unknown' device_instance_id.
-  backfillUnknownDeviceInstanceId(db, deviceInstanceId, device)
 
   // Backfill platform for existing records that have an empty platform field.
   if (devicePlatform) {

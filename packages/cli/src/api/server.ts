@@ -36,7 +36,7 @@ import { clearCredentials, hasCredentials, loadCredentials, saveCredentials } fr
 import { base64url, sha256Buffer } from '../leaderboard/crypto.js'
 import { recordLeaderboardUpload, uploadLeaderboardData } from '../commands/leaderboard-upload.js'
 import { isKelivoSourceFile, runParseKelivo } from '../commands/parse-kelivo.js'
-import { insertChangedRecords, LOCAL_RECORDS_WHERE } from '../db/records.js'
+import { insertChangedRecords, LOCAL_RECORDS_WHERE, recordIdForReread } from '../db/records.js'
 import { applyPricingToSyncedRecords, type SyncedRecordPricing } from '../db/synced-records.js'
 import { AsyncTaskQueue, type AsyncTaskQueueStatus } from '../db/write-queue.js'
 import { getPricingRegistrySummary, getUserAliasBindings, hasUserPrice, listLocalModelBindings, listPricingAliasTargets, listPricingModels, loadPricingRuntime, removeUserPricingAlias, resetUserPriceToSynced, resolvePriceFromRegistry, setUserPrice, setUserPricingAlias, syncPricingFromLitellm } from '../pricing-registry.js'
@@ -2232,14 +2232,19 @@ export function createApiServer(db: Database.Database, options?: ApiServerOption
 
           const cfg = loadConfig()
           const now = Date.now()
-          const result = await runParseKelivo({
+          const deviceInstanceId = options?.currentDeviceInstanceId ?? 'unknown'
+          // A message imported before this installation had a device id keeps
+          // the record it was stored under (see recordIdForReread), which can
+          // fold a copy into it, so the backup is read in the write queue.
+          const result = await runDbWrite(() => runParseKelivo({
             filePath: tempPath,
             device: getDeviceName(),
-            deviceInstanceId: options?.currentDeviceInstanceId ?? 'unknown',
+            deviceInstanceId,
+            recordId: recordIdForReread(db, deviceInstanceId),
             platform: cfg?.platform ?? platform(),
             now,
             exchangeRate: resolveExchangeRate(cfg ?? {}),
-          })
+          }))
           if (result.errors.length > 0 && result.records.length === 0) {
             json(res, { error: { code: 'IMPORT_FAILED', message: result.errors[0] }, errors: result.errors }, 400)
             return

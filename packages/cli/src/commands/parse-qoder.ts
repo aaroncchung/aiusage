@@ -1,12 +1,14 @@
 import type Database from 'better-sqlite3'
 import type { StatsRecord, ToolCallRecord } from '@aiusage/core'
-import { generateRecordId, inferProvider, calculateCost, normalizeQoderModel } from '@aiusage/core'
+import { inferProvider, calculateCost, normalizeQoderModel, recordIdFor, type RecordIdBuilder } from '@aiusage/core'
 import type { QoderCursor } from '../watermark.js'
 
 export interface QoderImportOptions {
   dbPath: string
   device: string
   deviceInstanceId: string
+  /** Builds record ids (see recordIdFor); runParse passes recordIdForReread. */
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   cursor: QoderCursor | null
@@ -95,7 +97,7 @@ export function runParseQoder(
     const cost = calculatedCost
     const costSource: StatsRecord['costSource'] = calculatedCost > 0 ? 'pricing' : 'unknown'
 
-    const recordId = generateRecordId(deviceInstanceId, dbPath + ':' + row.id, ts)
+    const recordId = recordIdFor(options, dbPath + ':' + row.id, ts)
 
     records.push({
       id: recordId,
