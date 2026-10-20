@@ -419,6 +419,20 @@ export function backfillUnknownDeviceInstanceId(db: Database.Database, deviceIns
   })()
 }
 
+/** The record ids of one parse: see `recordIdsForReread`. */
+export interface RereadRecordIds {
+  /** Builds a record's id; pass it to the importers as their `recordId`. */
+  recordId: RecordIdBuilder
+  /**
+   * For an id `recordId` returned from the `'unknown'` sentinel, the id the
+   * same record has under the device's own id: the id of the copy that a
+   * release without this lookup stored. `foldRecordCopy` keeps a Claude Code
+   * copy's calls under the original, still under ids built from this one
+   * (see `deleteAdoptedToolCall`).
+   */
+  copyIdOf(id: string): string | undefined
+}
+
 /**
  * Builds the record ids of a parse, for every importer: any of them can read
  * a record it has stored before (a one-time re-import, a file or database
@@ -429,17 +443,17 @@ export function backfillUnknownDeviceInstanceId(db: Database.Database, deviceIns
  * `'unknown'` sentinel, and keeps that id when
  * `backfillUnknownDeviceInstanceId` relabels it. Built from the device's own
  * id, the same record read again would get a second id and be stored twice.
- * This returns the sentinel's id while a local row of this device is stored
- * under it, and the device's own id otherwise.
+ * `recordId` returns the sentinel's id while a local row of this device is
+ * stored under it, and the device's own id otherwise.
  *
  * A record that is stored under both ids was stored twice by a release
  * without this lookup, and the row under the device's own id is the copy: it
  * is folded into the original and deleted when the lookup finds it (see
  * `foldRecordCopy`), before the caller writes what it has just read.
  */
-export function recordIdForReread(db: Database.Database, deviceInstanceId: string): RecordIdBuilder {
+export function recordIdsForReread(db: Database.Database, deviceInstanceId: string): RereadRecordIds {
   if (!deviceInstanceId || deviceInstanceId === UNKNOWN_DEVICE_INSTANCE_ID) {
-    return (seed, offset) => generateRecordId(deviceInstanceId, seed, offset)
+    return { recordId: (seed, offset) => generateRecordId(deviceInstanceId, seed, offset), copyIdOf: () => undefined }
   }
   const stored = db.prepare(`
     SELECT 1 FROM records
@@ -448,20 +462,34 @@ export function recordIdForReread(db: Database.Database, deviceInstanceId: strin
   // Every line of a message, and every pass over a line before the
   // watermark, asks for the same id: answer each seed once per parse.
   const resolved = new Map<string, string>()
-  return (seed, offset) => {
-    const key = `${seed}\0${offset}`
-    const known = resolved.get(key)
-    if (known !== undefined) return known
-    const id = generateRecordId(deviceInstanceId, seed, offset)
-    const sentinelId = generateRecordId(UNKNOWN_DEVICE_INSTANCE_ID, seed, offset)
-    let result = id
-    if (stored.get(sentinelId, deviceInstanceId)) {
-      result = sentinelId
-      if (stored.get(id, deviceInstanceId)) foldRecordCopy(db, id, sentinelId)
-    }
-    resolved.set(key, result)
-    return result
+  const copyIds = new Map<string, string>()
+  return {
+    recordId: (seed, offset) => {
+      const key = `${seed}\0${offset}`
+      const known = resolved.get(key)
+      if (known !== undefined) return known
+      const id = generateRecordId(deviceInstanceId, seed, offset)
+      const sentinelId = generateRecordId(UNKNOWN_DEVICE_INSTANCE_ID, seed, offset)
+      let result = id
+      if (stored.get(sentinelId, deviceInstanceId)) {
+        result = sentinelId
+        copyIds.set(sentinelId, id)
+        if (stored.get(id, deviceInstanceId)) foldRecordCopy(db, id, sentinelId)
+      }
+      resolved.set(key, result)
+      return result
+    },
+    copyIdOf: (id) => copyIds.get(id),
   }
+}
+
+/**
+ * How a Claude Code record's state in `a` compares with `b`: by timestamp,
+ * then by output tokens, as `runParse` orders the lines of a message (each
+ * line carries the usage so far). Positive when `a` is the later state.
+ */
+function claudeCodeStateOrder(a: StatsRecord, b: StatsRecord): number {
+  return a.ts !== b.ts ? a.ts - b.ts : a.outputTokens - b.outputTokens
 }
 
 /**
@@ -470,14 +498,24 @@ export function recordIdForReread(db: Database.Database, deviceInstanceId: strin
  * one record, such as both ids being built from the same seed.
  *
  * The copy was written by the later read, so its measurements replace the
- * original's (`insertRecord` moves `updated_at` only when they differ). The
- * original keeps its id, its place in its source (`source_file`,
- * `line_offset`, `session_id`), its import time and its sync state, which can
- * be older than the copy. The copy's tool calls and sync state go with it.
- * A sync target that acknowledged the copy under a wire id that no remaining
- * row publishes gets that id retired, as migration v14 retires ids: the cloud
- * receives a tombstone, and a file target leaves the copy out of its next
- * snapshot. Returns false, changing nothing, unless both rows are local.
+ * original's (`insertRecord` moves `updated_at` only when they differ). A
+ * Claude Code message can be read from several transcripts that hold it at
+ * different stages, so there they replace the original's only when they are
+ * the later state. The original keeps its id, its place in its source
+ * (`source_file`, `line_offset`, `session_id`), its import time and its sync
+ * state, which can be older than the copy.
+ *
+ * Claude Code calls are keyed on their `tool_use` block, and the copy's can
+ * come from a transcript that no longer exists, so they are kept under the
+ * original; reading a block again replaces its adopted call
+ * (`deleteAdoptedToolCall`). Other tools key their calls on the record, and
+ * the original holds the same calls, so the copy's go with it, as does its
+ * sync state. A sync target that acknowledged the copy under a wire id that
+ * no remaining row publishes gets that id retired, as migration v14 retires
+ * ids: the cloud receives a tombstone (unless a row is published under it by
+ * then, see `unretirePublishedWireIds`), and a file target leaves the copy out
+ * of its next snapshot. Returns false, changing nothing, unless both rows are
+ * local.
  */
 export function foldRecordCopy(db: Database.Database, copyId: string, originalId: string): boolean {
   return db.transaction(() => {
@@ -486,19 +524,25 @@ export function foldRecordCopy(db: Database.Database, copyId: string, originalId
     if (!copy || !original || copyId === originalId) return false
     if (copy.origin !== 'local' || original.origin !== 'local') return false
 
-    insertRecord(db, {
-      ...original,
-      ts: copy.ts,
-      model: copy.model,
-      provider: copy.provider,
-      inputTokens: copy.inputTokens,
-      outputTokens: copy.outputTokens,
-      cacheReadTokens: copy.cacheReadTokens,
-      cacheWriteTokens: copy.cacheWriteTokens,
-      thinkingTokens: copy.thinkingTokens,
-      cost: copy.cost,
-      costSource: copy.costSource,
-    })
+    const claudeCode = copy.tool === 'claude-code'
+    if (!claudeCode || claudeCodeStateOrder(copy, original) > 0) {
+      insertRecord(db, {
+        ...original,
+        ts: copy.ts,
+        model: copy.model,
+        provider: copy.provider,
+        inputTokens: copy.inputTokens,
+        outputTokens: copy.outputTokens,
+        cacheReadTokens: copy.cacheReadTokens,
+        cacheWriteTokens: copy.cacheWriteTokens,
+        thinkingTokens: copy.thinkingTokens,
+        cost: copy.cost,
+        costSource: copy.costSource,
+      })
+    }
+    if (claudeCode) {
+      db.prepare('UPDATE tool_calls SET record_id = ? WHERE record_id = ?').run(originalId, copyId)
+    }
 
     const targets = (db.prepare('SELECT target FROM sync_record_state WHERE record_id = ?').all(copyId) as Array<{ target: string }>)
       .map(row => row.target)
@@ -512,10 +556,16 @@ export function foldRecordCopy(db: Database.Database, copyId: string, originalId
   })()
 }
 
+/** The wire id `row` is published under once a row still labelled `'unknown'` is relabelled. */
+function publishedWireId(row: Record<string, unknown>, deviceInstanceId: string): string {
+  const record = mapRowToRecord(row)
+  const publishedAs = record.deviceInstanceId === UNKNOWN_DEVICE_INSTANCE_ID ? deviceInstanceId : record.deviceInstanceId
+  return mapStatsRecordToSyncRecord({ ...record, deviceInstanceId: publishedAs }).id
+}
+
 /**
  * True when a local row is published under `wireId`. Only a row with that id
- * or one at the same place in the same source can be. A row still labelled
- * `'unknown'` is published under `deviceInstanceId` once it is relabelled.
+ * or one at the same place in the same source can be.
  */
 function isWireIdPublished(
   db: Database.Database,
@@ -527,11 +577,34 @@ function isWireIdPublished(
     SELECT * FROM records
     WHERE ${LOCAL_RECORDS_WHERE} AND (id = ? OR (source_file = ? AND line_offset = ?))
   `).all(wireId, near.sourceFile, near.lineOffset) as Record<string, unknown>[]
-  return rows.some((row) => {
-    const record = mapRowToRecord(row)
-    const publishedAs = record.deviceInstanceId === UNKNOWN_DEVICE_INSTANCE_ID ? deviceInstanceId : record.deviceInstanceId
-    return mapStatsRecordToSyncRecord({ ...record, deviceInstanceId: publishedAs }).id === wireId
-  })
+  return rows.some(row => publishedWireId(row, deviceInstanceId) === wireId)
+}
+
+/**
+ * Drops from `target`'s retirement queue every wire id that a local row of
+ * this device is published under now. The row is pushed under that id, and a
+ * tombstone sent after it would delete it from the cloud. A fold retires a
+ * copy's wire id that no row publishes, and the parse can move the original
+ * onto it right after: a Claude Code record follows its message's last line.
+ * Returns the number of ids dropped.
+ */
+export function unretirePublishedWireIds(db: Database.Database, target: string, deviceInstanceId: string): number {
+  const retired = db.prepare('SELECT wire_id FROM sync_retired_wire_ids WHERE target = ?').all(target) as Array<{ wire_id: string }>
+  if (retired.length === 0) return 0
+  const published = new Set<string>()
+  const rows = db.prepare(`
+    SELECT * FROM records
+    WHERE ${LOCAL_RECORDS_WHERE} AND device_instance_id IN (?, '${UNKNOWN_DEVICE_INSTANCE_ID}')
+  `).all(deviceInstanceId) as Record<string, unknown>[]
+  for (const row of rows) published.add(publishedWireId(row, deviceInstanceId))
+  const drop = db.prepare('DELETE FROM sync_retired_wire_ids WHERE target = ? AND wire_id = ?')
+  return db.transaction(() => {
+    let dropped = 0
+    for (const { wire_id } of retired) {
+      if (published.has(wire_id)) dropped += drop.run(target, wire_id).changes
+    }
+    return dropped
+  })()
 }
 
 /**

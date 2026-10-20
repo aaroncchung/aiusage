@@ -7,7 +7,7 @@ export interface ZedImportOptions {
   dbPath: string
   device: string
   deviceInstanceId: string
-  /** Builds record ids (see recordIdFor); runParse passes recordIdForReread. */
+  /** Builds record ids (see recordIdFor); runParse passes recordIdsForReread. */
   recordId?: RecordIdBuilder
   platform?: string
   now: number

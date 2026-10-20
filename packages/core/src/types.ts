@@ -69,6 +69,7 @@ export interface ToolCallRecord {
   name: string                         // 工具名称，如 "Read"、"Bash"、"Edit"
   ts: number                           // 调用时间戳（毫秒）
   callIndex: number                    // 同一 record 内的工具调用序号
+  blockKey?: string                    // Claude Code: the key the id is built from with the record id (generateBlockToolCallId)
 }
 
 export interface SyncRecord {

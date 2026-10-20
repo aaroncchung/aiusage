@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { generateBlockToolCallId, generateRecordId, generateSyncRecordId, generateToolCallId } from '@aiusage/core'
 import { initializeDatabase } from '../../src/db/index.js'
-import { getUnsyncedRecords, insertRecord, recordIdForReread } from '../../src/db/records.js'
+import { getUnsyncedRecords, insertRecord, recordIdsForReread } from '../../src/db/records.js'
 import { getRetiredWireIds } from '../../src/db/sync-claims.js'
 import { migrateV17 } from '../../src/db/migrations/v17.js'
 import { runParse } from '../../src/commands/parse.js'
@@ -335,7 +335,7 @@ describe('an installation that always had its device id', () => {
   })
 })
 
-describe('recordIdForReread', () => {
+describe('recordIdsForReread', () => {
   it('returns the device\'s own id unless a local row of this device is stored under the sentinel\'s', () => {
     const base = {
       ts: 1, ingestedAt: 1, updatedAt: 1, lineOffset: 0, tool: 'kelivo' as const, model: 'gpt-4o', provider: 'openai',
@@ -345,14 +345,16 @@ describe('recordIdForReread', () => {
     insertRecord(db, { ...base, id: sentinel('pulled', 5), deviceInstanceId: 'other-device', origin: 'synced' })
     insertRecord(db, { ...base, id: sentinel('relabelled', 5), deviceInstanceId: DEVICE, origin: 'local' })
     insertRecord(db, { ...base, id: sentinel('not-yet-relabelled', 5), deviceInstanceId: 'unknown', origin: 'local' })
-    const recordId = recordIdForReread(db, DEVICE)
+    const { recordId, copyIdOf } = recordIdsForReread(db, DEVICE)
 
     expect(recordId('new', 5)).toBe(own('new', 5))
     expect(recordId('pulled', 5)).toBe(own('pulled', 5))
     expect(recordId('relabelled', 5)).toBe(sentinel('relabelled', 5))
     expect(recordId('not-yet-relabelled', 5)).toBe(sentinel('not-yet-relabelled', 5))
+    expect(copyIdOf(sentinel('relabelled', 5))).toBe(own('relabelled', 5))
+    expect(copyIdOf(own('new', 5))).toBeUndefined()
     // Without a device id there is nothing to look up.
-    expect(recordIdForReread(db, 'unknown')('relabelled', 5)).toBe(sentinel('relabelled', 5))
+    expect(recordIdsForReread(db, 'unknown').recordId('relabelled', 5)).toBe(sentinel('relabelled', 5))
   })
 
   it('folds a copy only into a local original, and maps the original\'s wire id as relabelled', () => {
@@ -367,7 +369,7 @@ describe('recordIdForReread', () => {
     db.prepare('INSERT INTO sync_record_state (record_id, target, synced_at) VALUES (?, ?, 1)').run(own('m', 0), CLOUD)
     const wire = mapStatsRecordToSyncRecord({ ...base, id: own('m', 0), deviceInstanceId: DEVICE }).id
 
-    expect(recordIdForReread(db, DEVICE)('m', 0)).toBe(sentinel('m', 0))
+    expect(recordIdsForReread(db, DEVICE).recordId('m', 0)).toBe(sentinel('m', 0))
 
     expect(ids('claude-code')).toEqual([sentinel('m', 0)])
     expect(wire).toBe(generateSyncRecordId(DEVICE, '/p/s.jsonl', 3))

@@ -8,7 +8,7 @@ export interface TraeImportOptions {
   dbPath: string           // state.vscdb path (used to derive data dir)
   device: string
   deviceInstanceId: string
-  /** Builds record ids (see recordIdFor); runParse passes recordIdForReread. */
+  /** Builds record ids (see recordIdFor); runParse passes recordIdsForReread. */
   recordId?: RecordIdBuilder
   platform?: string
   now: number

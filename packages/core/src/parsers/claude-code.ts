@@ -37,6 +37,7 @@ export function claudeCodeToolCall(block: any, recordId: string, ts: number, cal
     name: storedName,
     ts,
     callIndex,
+    blockKey: blockId,
   }
 }
 

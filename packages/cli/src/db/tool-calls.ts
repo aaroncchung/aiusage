@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 import type { ToolCallRecord } from '@aiusage/core'
-import { generateToolCallId } from '@aiusage/core'
+import { generateBlockToolCallId, generateToolCallId } from '@aiusage/core'
 
 export function insertToolCall(db: Database.Database, tc: ToolCallRecord): void {
   db.prepare(`
@@ -67,6 +67,23 @@ export function deletePositionalCounterpart(db: Database.Database, tc: ToolCallR
     deleted += remove.run(id, tc.recordId).changes
   }
   return deleted
+}
+
+/**
+ * Delete the call that `tc`'s record adopted from its copy for the same
+ * `tool_use` block. `foldRecordCopy` keeps a Claude Code copy's calls under
+ * the original record, still under ids built from the copy's id (`copyId`,
+ * see `RereadRecordIds.copyIdOf`); `tc` writes that block under the record's
+ * own id, so the adopted row would count the call twice. A copy written
+ * before calls were keyed on their block (v1.5.22) holds the call under its
+ * positional id, matched as `deletePositionalCounterpart` matches one.
+ * Returns the number of rows deleted.
+ */
+export function deleteAdoptedToolCall(db: Database.Database, tc: ToolCallRecord, copyId: string | undefined): number {
+  if (!tc.recordId || !copyId || !tc.blockKey) return 0
+  const remove = db.prepare('DELETE FROM tool_calls WHERE id = ? AND record_id = ?')
+  return remove.run(generateBlockToolCallId(copyId, tc.blockKey), tc.recordId).changes
+    + remove.run(generateToolCallId(copyId, tc.name, tc.ts, tc.callIndex), tc.recordId).changes
 }
 
 export function getToolCallsByRecordId(db: Database.Database, recordId: string | null): ToolCallRecord[] {

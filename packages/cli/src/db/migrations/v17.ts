@@ -12,7 +12,7 @@ import { foldLineSeededRecordCopies } from '../records.js'
  * v1.5.23's one-time Claude Code and CodeFuse re-imports did so for whole
  * histories, and so did a source read in full again for any other reason.
  *
- * Parsing now finds the original id (`recordIdForReread`), and every source
+ * Parsing now finds the original id (`recordIdsForReread`), and every source
  * that is read again folds the copies it finds into their originals. This
  * migration removes the copies that are proven without reading the source,
  * which may be gone: those of records whose id is built from their source

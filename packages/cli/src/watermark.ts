@@ -12,7 +12,7 @@ const CURRENT_CODEBUDDY_PARSER_VERSION = 1
  * ids built from the 'unknown' sentinel. A re-import under the device id that
  * v1.5.22 creates stored them a second time: v1 did so for installations that
  * skipped from a release before it to v1.5.22 or later. Every conversation
- * database is re-imported once more; `recordIdForReread` finds each stored
+ * database is re-imported once more; `recordIdsForReread` finds each stored
  * record and folds such a copy into it.
  */
 const CURRENT_ANTIGRAVITY_PARSER_VERSION = 2

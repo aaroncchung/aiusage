@@ -4,8 +4,8 @@ import { basename, join, dirname } from 'node:path'
 import { hostname } from 'node:os'
 import { Aggregator, resolveExchangeRate, generateToolCallId, claudeCodeToolCall, inferProvider, calculateCost, resolvePrice, recordIdFor, normalizeCodeFuseModel, parseTimestamp, type RecordIdBuilder, type StatsRecord, type Tool } from '@aiusage/core'
 import type { ToolCallRecord } from '@aiusage/core'
-import { insertChangedRecords, insertRecord, LOCAL_RECORDS_WHERE, backfillUnknownDeviceInstanceId, recordIdForReread } from '../db/records.js'
-import { insertToolCall, deletePositionalCounterpart, hasPositionalToolCallId } from '../db/tool-calls.js'
+import { insertChangedRecords, insertRecord, LOCAL_RECORDS_WHERE, backfillUnknownDeviceInstanceId, recordIdsForReread } from '../db/records.js'
+import { insertToolCall, deleteAdoptedToolCall, deletePositionalCounterpart, hasPositionalToolCallId } from '../db/tool-calls.js'
 import { getState } from '../init.js'
 import { loadConfig, AIUSAGE_DIR } from '../config.js'
 import { WatermarkManager } from '../watermark.js'
@@ -516,10 +516,11 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
   // Rows parsed before this installation had a device id carry the 'unknown'
   // sentinel, and their ids are built from it. They are relabelled before
   // anything is read, and every record id below is built by
-  // recordIdForReread, so a record read again is written to the row it is
+  // recordIdsForReread, so a record read again is written to the row it is
   // stored under instead of being stored a second time.
   backfillUnknownDeviceInstanceId(db, deviceInstanceId, device)
-  const recordId = recordIdForReread(db, deviceInstanceId)
+  const recordIds = recordIdsForReread(db, deviceInstanceId)
+  const recordId = recordIds.recordId
 
   const watermarkPath = join(AIUSAGE_DIR, 'watermark.json')
   const wm = new WatermarkManager(watermarkPath)
@@ -933,6 +934,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
               const fromStoredLine = storedLines.get(tc.recordId!) === lineOffset && !toolCallExists.get(tc.id)
               deletePositionalCounterpart(db, tc, fromStoredLine)
             }
+            if (tc.recordId) deleteAdoptedToolCall(db, tc, recordIds.copyIdOf(tc.recordId))
             insertToolCall(db, tc)
           }
         })()
