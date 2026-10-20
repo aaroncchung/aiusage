@@ -9,7 +9,7 @@ export async function runMigrations(): Promise<void> {
     applied_at TIMESTAMPTZ DEFAULT NOW()
   )`
 
-  const applied = await sql`SELECT version FROM schema_migrations ORDER BY version`
+  const applied = await sql<{ version: number }[]>`SELECT version FROM schema_migrations ORDER BY version`
   const appliedVersions = new Set(applied.map((r: { version: number }) => r.version))
 
   for (const migration of migrations) {
