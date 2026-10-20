@@ -80,7 +80,9 @@ export function deletePositionalCounterpart(db: Database.Database, tc: ToolCallR
  * A copy written before calls were keyed on their block (v1.5.22) holds the
  * calls of the line it was stored from under positional ids. Another block
  * of the message can share a call's name, timestamp and index, so such a row
- * is this call only when `tc` comes from that very line, the rule
+ * is this call only when `tc` comes from that very line and the copy was not
+ * written from it again since under block-keyed ids (after which a
+ * positional row was kept from somewhere else): the rules
  * `deletePositionalCounterpart` follows for the record's own rows. Returns
  * the number of rows deleted.
  */
@@ -92,9 +94,11 @@ export function deleteAdoptedToolCall(
   lineOffset: number,
 ): number {
   if (!tc.recordId || !copy || !tc.blockKey) return 0
+  const blockKeyed = generateBlockToolCallId(copy.id, tc.blockKey)
+  const writtenByBlock = db.prepare('SELECT 1 FROM tool_calls WHERE id = ? AND record_id = ?').get(blockKeyed, tc.recordId) !== undefined
   const remove = db.prepare('DELETE FROM tool_calls WHERE id = ? AND record_id = ?')
-  let deleted = remove.run(generateBlockToolCallId(copy.id, tc.blockKey), tc.recordId).changes
-  if (copy.sourceFile === sourceFile && copy.lineOffset === lineOffset) {
+  let deleted = remove.run(blockKeyed, tc.recordId).changes
+  if (!writtenByBlock && copy.sourceFile === sourceFile && copy.lineOffset === lineOffset) {
     const names = tc.name.startsWith('skill__') ? [tc.name, 'Skill', 'skill__unknown'] : [tc.name]
     for (const name of new Set(names)) {
       deleted += remove.run(generateToolCallId(copy.id, name, tc.ts, tc.callIndex), tc.recordId).changes
