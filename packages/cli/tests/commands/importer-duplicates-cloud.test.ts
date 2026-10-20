@@ -26,6 +26,10 @@ let whileUploading: (() => void) | null = null
 let whileRetracting: (() => void) | null = null
 /** The server accepts the next record push, but the response does not arrive. */
 let loseResponse = false
+/** The next tombstone push fails before it reaches the server. */
+let failRetraction = false
+/** Ids whose tombstone the server reports as not applied, once each. */
+const refuseTombstones = new Set<string>()
 
 vi.mock('../../src/sync/cloud.js', () => ({
   CloudSyncError: class CloudSyncError extends Error {},
@@ -41,13 +45,22 @@ vi.mock('../../src/sync/cloud.js', () => ({
       whileRetracting = null
       run()
     }
+    if (tombstones.length > 0 && failRetraction) {
+      failRetraction = false
+      throw new Error('connection reset')
+    }
     for (const record of records) {
       const held = server.get(record.id)
       // A record that exists is replaced only by a newer version.
       if (!held || held.record.updatedAt < record.updatedAt) server.set(record.id, { record, deleted: false })
     }
+    const rejectedTombstoneIds: string[] = []
     for (const tombstone of tombstones) {
       tombstonesSent.push(tombstone.record_id)
+      if (refuseTombstones.delete(tombstone.record_id)) {
+        rejectedTombstoneIds.push(tombstone.record_id)
+        continue
+      }
       const held = server.get(tombstone.record_id)
       // A tombstone is a version of its own: only a newer record brings the id back.
       if (held) server.set(tombstone.record_id, { record: { ...held.record, updatedAt: tombstone.updatedAt }, deleted: true })
@@ -56,7 +69,7 @@ vi.mock('../../src/sync/cloud.js', () => ({
       loseResponse = false
       throw new Error('socket hang up')
     }
-    return { inserted: 0, updated: 0, skipped: 0, syncGeneration: 1 }
+    return { inserted: 0, updated: 0, skipped: 0, rejectedTombstoneIds, syncGeneration: 1 }
   }),
 }))
 
@@ -96,6 +109,8 @@ describe('importer duplicates and sync targets', () => {
     whileUploading = null
     whileRetracting = null
     loseResponse = false
+    failRetraction = false
+    refuseTombstones.clear()
     vi.clearAllMocks()
   })
 
@@ -160,6 +175,53 @@ describe('importer duplicates and sync targets', () => {
 
     expect((await cloudSync()).status).toBe('ok')
     expect(onServer().map(r => r.id).sort()).toEqual(second.map(row => row.id).sort())
+  })
+
+  it('keeps a row deleted during an upload listed when the tombstone request fails, and retracts it on the retry', async () => {
+    const [deleted, kept] = [oldKiro(0, T0), oldKiro(0, T0 + 60_000)]
+    for (const row of [deleted, kept]) insertRecord(db, row)
+    // Not acknowledged when it is deleted: only the list of deleted rows has it.
+    whileUploading = () => { collapseImporterDuplicates(db) }
+    failRetraction = true
+
+    expect((await cloudSync()).status).toBe('failed')
+    expect(onServer().map(r => r.id).sort()).toEqual([deleted.id, kept.id].sort())
+    expect(retired()).toEqual([])
+    expect(db.prepare(`SELECT wire_id FROM sync_retired_wire_ids WHERE target = ?`).pluck().all(DELETED_LOCAL_ROWS)).toEqual([deleted.id])
+
+    expect(await cloudSync()).toMatchObject({ status: 'ok', retiredCount: 1 })
+    expect(onServer().map(r => r.id)).toEqual([kept.id])
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM sync_retired_wire_ids`).get()).toEqual({ n: 0 })
+  })
+
+  it('keeps a deleted row queued under both keys while the server does not apply its tombstone, sending it once per sync', async () => {
+    const [deleted, kept] = [oldKiro(0, T0), oldKiro(0, T0 + 60_000)]
+    for (const row of [deleted, kept]) insertRecord(db, row)
+    await cloudSync()
+    expect(collapseImporterDuplicates(db).kiro).toBe(1)
+    refuseTombstones.add(deleted.id)
+
+    const refused = await cloudSync()
+    expect(refused).toMatchObject({ status: 'ok', retiredCount: 0, unretiredCount: 1 })
+    expect(tombstonesSent).toEqual([deleted.id])
+    expect(retired()).toEqual([{ target: 'cloud', wire_id: deleted.id }])
+    expect(db.prepare(`SELECT wire_id FROM sync_retired_wire_ids WHERE target = ?`).pluck().all(DELETED_LOCAL_ROWS)).toEqual([deleted.id])
+    expect(onServer().map(r => r.id).sort()).toEqual([deleted.id, kept.id].sort())
+
+    const applied = await cloudSync()
+    expect(applied).toMatchObject({ status: 'ok', retiredCount: 1 })
+    expect(applied.unretiredCount).toBeUndefined()
+    expect(onServer().map(r => r.id)).toEqual([kept.id])
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM sync_retired_wire_ids`).get()).toEqual({ n: 0 })
+  })
+
+  it('forgets a listed id the cloud cannot hold without sending it', async () => {
+    const queue = db.prepare(`INSERT INTO sync_retired_wire_ids (target, wire_id) VALUES (?, ?)`)
+    for (const id of ['gone', 'bad\u0000id', '']) queue.run(DELETED_LOCAL_ROWS, id)
+
+    expect(await cloudSync()).toMatchObject({ status: 'ok', retiredCount: 1 })
+    expect(tombstonesSent).toEqual(['gone'])
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM sync_retired_wire_ids`).get()).toEqual({ n: 0 })
   })
 
   it('sends a tombstone that changes nothing for a row that was deleted before it was uploaded', async () => {

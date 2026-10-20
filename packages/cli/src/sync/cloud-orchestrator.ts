@@ -394,8 +394,9 @@ export class CloudSyncOrchestrator {
 
   /**
    * Take every wire id off the queue that a local row of this device is
-   * published under: `push` has just uploaded that row, and its tombstone
-   * would delete it on the server for good, since the row counts as synced.
+   * published under. `push` has just uploaded that row, or left it unsynced
+   * when the cloud did not store it; either way it is live, and a tombstone
+   * would delete it on the server, for good once the row counts as synced.
    * A parse of this version never leaves such an entry (it stores through
    * `storeRecords` in `commands/importer-duplicates.ts`), but a row can come
    * back under a queued id by other means, e.g. an older CLI that reads the

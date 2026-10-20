@@ -259,15 +259,18 @@ describe('importer duplicates', () => {
       const log = join(scratch, 'tokens_generated.jsonl')
       const transcript = join(scratch, 'p', 'agent-transcripts', 'c1', 'c1.jsonl')
       const entry = { offset: 10, size: 10, mtime: 1 }
-      writeFileSync(watermarkPath, JSON.stringify({
-        files: {
-          kiro: { [log]: entry, [join(scratch, 'session.json')]: entry },
-          cursor: { [transcript]: entry },
-          'claude-code': { [join(scratch, 'a.jsonl')]: entry },
-        },
-        codebuddyIde: 12345,
-        cursor: { lastCreatedAt: 99, lastId: 'c9' },
-      }))
+      // Written as the release before the repair writes it: every current
+      // parser version (so load() resets nothing), no importerDedupVersion.
+      rmSync(watermarkPath, { force: true })
+      const before = new WatermarkManager(watermarkPath)
+      before.setEntry('kiro', log, entry)
+      before.setEntry('kiro', join(scratch, 'session.json'), entry)
+      before.setEntry('cursor', transcript, entry)
+      before.setEntry('claude-code', join(scratch, 'a.jsonl'), entry)
+      before.setCodeBuddyIdeCursor(12345)
+      before.setCursorCursor({ lastCreatedAt: 99, lastId: 'c9' })
+      before.save()
+      expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).importerDedupVersion).toBeUndefined()
       seedKiroGenerations(log)
 
       const wm = new WatermarkManager(watermarkPath)
