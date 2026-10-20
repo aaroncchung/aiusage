@@ -65,6 +65,13 @@ const SIDE_FILE_SUFFIXES = ['-wal', '-shm', '-journal']
  * The side files move before the database, and a move that fails undoes the
  * ones before it and throws: a database left in place keeps its own journal
  * and is found corrupted again on the next run.
+ *
+ * Windows refuses to move a file another process has open, so a running
+ * dashboard or widget makes the move fail. Linux and macOS move it: that
+ * process keeps using the moved file until it opens the database again, and
+ * SQLite removes journal files by their original names when it closes
+ * (https://www.sqlite.org/howtocorrupt.html#_unlinking_or_renaming_a_database_file_while_in_use),
+ * hence the advice to restart them.
  */
 function moveCorruptedDbAside(path: string): string {
   const watermarkPath = join(dirname(path), 'watermark.json')
@@ -121,7 +128,7 @@ export function createDatabase(path: string): Database.Database {
       if (!isCorrupted(err)) throw err
     }
     const aside = moveCorruptedDbAside(path)
-    console.warn(`Database corrupted: moved ${path} to ${aside} and created a new one. The next parse imports the usage again from the tools' logs; usage whose logs no longer exist is only in the moved file.`)
+    console.warn(`Database corrupted: moved ${path} to ${aside} and created a new one. The next parse imports the usage again from the tools' logs; usage whose logs no longer exist is only in the moved file. Restart the dashboard and the widget if they are running.`)
     return openDatabase(path)
   })
 }

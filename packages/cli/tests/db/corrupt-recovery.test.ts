@@ -3,13 +3,15 @@ import Database from 'better-sqlite3'
 import { spawn } from 'node:child_process'
 import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-// Failures injected into the renames and deletions src/db/index.ts makes.
+// Failures injected into the renames and deletions src/db/index.ts makes, and
+// a probe on the directory creation that precedes taking the settings lock.
 const fsHooks = vi.hoisted(() => ({
   failRename: null as null | ((from: string) => boolean),
   failUnlink: null as null | ((path: string) => boolean),
+  onMkdir: null as null | ((path: string) => void),
 }))
 
 vi.mock('node:fs', async () => {
@@ -18,6 +20,10 @@ vi.mock('node:fs', async () => {
     Object.assign(new Error(`${code}: injected failure, ${op} '${path}'`), { code })
   return {
     ...actual,
+    mkdirSync: (path: Parameters<typeof actual.mkdirSync>[0], options?: Parameters<typeof actual.mkdirSync>[1]) => {
+      fsHooks.onMkdir?.(String(path))
+      return actual.mkdirSync(path, options)
+    },
     renameSync: (from: Parameters<typeof actual.renameSync>[0], to: Parameters<typeof actual.renameSync>[1]) => {
       if (fsHooks.failRename?.(String(from))) throw fail('EBUSY', 'rename', String(from))
       return actual.renameSync(from, to)
@@ -31,6 +37,7 @@ vi.mock('node:fs', async () => {
 
 import { createDatabase } from '../../src/db/index.js'
 import { runParse } from '../../src/commands/parse.js'
+import { insertRecord } from '../../src/db/records.js'
 
 const NOT_A_DATABASE = 'this is not a SQLite database\n'
 
@@ -48,6 +55,7 @@ describe('createDatabase with a corrupted database (#93)', () => {
   afterEach(() => {
     fsHooks.failRename = null
     fsHooks.failUnlink = null
+    fsHooks.onMkdir = null
     warn.mockRestore()
     rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
   })
@@ -155,6 +163,58 @@ describe('createDatabase with a corrupted database (#93)', () => {
     expect(readFileSync(join(dir, main)).equals(damaged)).toBe(true)
   })
 
+  it('keeps usage committed only to the WAL of a database found corrupted while it is initialized', () => {
+    // A healthy database with a record committed to its WAL and never
+    // checkpointed, as a process killed after the write leaves it: the files
+    // are copied from a connection that is still open.
+    const source = mkdtempSync(join(tmpdir(), 'aiusage-corrupt-src-'))
+    const sourcePath = join(source, 'cache.db')
+    createDatabase(sourcePath).close()
+    const writer = new Database(sourcePath)
+    let rootPage: number
+    let pageSize: number
+    try {
+      writer.pragma('wal_autocheckpoint = 0')
+      rootPage = (writer.prepare("SELECT rootpage FROM sqlite_master WHERE name = 'model_prices'").get() as { rootpage: number }).rootpage
+      pageSize = writer.pragma('page_size', { simple: true }) as number
+      insertRecord(writer, {
+        id: 'only-in-the-wal', ts: 1776738085346, ingestedAt: 1776738085700, updatedAt: 1776738085700, lineOffset: 0,
+        tool: 'claude-code', model: 'claude-sonnet-4-6', provider: 'anthropic',
+        inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, thinkingTokens: 0,
+        cost: 0.001, costSource: 'pricing', sessionId: 's1', sourceFile: '/logs/gone.jsonl',
+        device: 'laptop', deviceInstanceId: 'device-1',
+      })
+      for (const suffix of ['', '-wal', '-shm']) copyFileSync(sourcePath + suffix, dbPath + suffix)
+    } finally {
+      writer.close()
+      rmSync(source, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
+    }
+    expect(readFileSync(dbPath + '-wal').length).toBeGreaterThan(0)
+    // Damage the table initialization writes first (the curated prices), not
+    // the records: the database opens with its WAL and fails later.
+    const fd = openSync(dbPath, 'r+')
+    writeSync(fd, Buffer.alloc(16, 0xff), 0, 16, (rootPage - 1) * pageSize)
+    closeSync(fd)
+
+    const db = createDatabase(dbPath)
+    try {
+      expectUsable(db)
+    } finally {
+      db.close()
+    }
+
+    // Closing the failed handle may have checkpointed the WAL into the
+    // database before it was moved; either way the moved files hold the record.
+    const [main] = asideFiles()
+    expect(warn).toHaveBeenCalledTimes(1)
+    const moved = new Database(join(dir, main))
+    try {
+      expect(moved.prepare('SELECT id FROM records').all()).toEqual([{ id: 'only-in-the-wal' }])
+    } finally {
+      moved.close()
+    }
+  })
+
   it('resets the import cursors beside the database and leaves the other settings alone', () => {
     writeFileSync(dbPath, NOT_A_DATABASE)
     writeFileSync(join(dir, 'watermark.json'), JSON.stringify({ files: { 'claude-code': { '/logs/a.jsonl': { offset: 10, size: 10, mtime: 1 } } } }))
@@ -249,37 +309,58 @@ describe('createDatabase with a corrupted database (#93)', () => {
     writeFileSync(dbPath, NOT_A_DATABASE)
 
     // The other process holds the settings lock (an exclusive transaction on
-    // settings.lock, as withSettingsLock takes it), puts its new database in
-    // place a moment later, and releases the lock.
+    // settings.lock, as withSettingsLock takes it). Once this process has
+    // found the database corrupted and goes for the lock, the other one puts
+    // its new database in place and releases the lock. If that moment never
+    // comes, it replaces nothing and exits with 3.
     const ready = join(dir, 'other-process-ready')
+    const waiting = join(dir, 'this-process-waiting')
     const script = `
       const Database = require('better-sqlite3')
-      const { copyFileSync, writeFileSync } = require('node:fs')
-      const [lockPath, readyPath, from, to] = process.argv.slice(1)
+      const { copyFileSync, existsSync, writeFileSync } = require('node:fs')
+      const [lockPath, readyPath, waitingPath, from, to] = process.argv.slice(1)
       const lock = new Database(lockPath)
       lock.exec('BEGIN EXCLUSIVE')
       writeFileSync(readyPath, '')
-      setTimeout(() => {
-        copyFileSync(from, to)
+      const started = Date.now()
+      const timer = setInterval(() => {
+        if (existsSync(waitingPath)) copyFileSync(from, to)
+        else if (Date.now() - started < 8000) return
+        else process.exitCode = 3
+        clearInterval(timer)
         lock.exec('ROLLBACK')
         lock.close()
-      }, 1500)
+      }, 20)
     `
-    const other = spawn(process.execPath, ['-e', script, join(dir, 'settings.lock'), ready, recovered, dbPath], { cwd: fileURLToPath(new URL('../..', import.meta.url)), stdio: 'inherit' })
-    const exited = new Promise<number | null>(resolve => other.on('exit', resolve))
+    const other = spawn(process.execPath, ['-e', script, join(dir, 'settings.lock'), ready, waiting, recovered, dbPath], { cwd: fileURLToPath(new URL('../..', import.meta.url)), stdio: 'inherit' })
+    const exited = new Promise<number | null>((resolve, reject) => {
+      other.on('error', reject)
+      other.on('exit', resolve)
+    })
+    let exitCode: number | null
     try {
-      for (let i = 0; i < 200 && !existsSync(ready); i++) await new Promise(resolve => setTimeout(resolve, 50))
+      for (let i = 0; i < 200 && !existsSync(ready) && other.exitCode === null; i++) await new Promise(r => setTimeout(r, 50))
       expect(existsSync(ready)).toBe(true)
 
+      // createDatabase creates the directory, fails to open the database, and
+      // creates the directory again as it takes the settings lock.
+      let mkdirs = 0
+      fsHooks.onMkdir = path => {
+        if (resolve(path) === resolve(dir) && ++mkdirs === 2) writeFileSync(waiting, '')
+      }
       const db = createDatabase(dbPath)
       try {
         expectUsable(db)
       } finally {
         db.close()
       }
+      expect(mkdirs).toBe(2)
     } finally {
-      expect(await exited).toBe(0)
+      fsHooks.onMkdir = null
+      const kill = setTimeout(() => other.kill(), 10_000)
+      exitCode = await exited.finally(() => clearTimeout(kill))
     }
+    expect(exitCode).toBe(0)
 
     expect(asideFiles()).toEqual([])
     expect(warn).not.toHaveBeenCalled()
