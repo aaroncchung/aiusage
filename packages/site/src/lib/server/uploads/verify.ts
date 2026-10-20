@@ -219,7 +219,7 @@ function getBreakdownShapeError(raw: Record<string, unknown>): string | null {
   }
 }
 
-function validateBreakdownShape(raw: Record<string, unknown>): raw is UploadBreakdown {
+function validateBreakdownShape(raw: Record<string, unknown>): raw is Record<string, unknown> & UploadBreakdown {
   return getBreakdownShapeError(raw) === null
 }
 

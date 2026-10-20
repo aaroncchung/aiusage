@@ -280,7 +280,7 @@ export const POST: RequestHandler = async ({ request }) => {
       // Update device instance cursor
       await tx`
         UPDATE cloud_device_instances
-        SET last_push_cursor = ${body.server_cursor || null}, updated_at = NOW()
+        SET last_push_cursor = ${(body.server_cursor as string | undefined) || null}, updated_at = NOW()
         WHERE id = ${instanceRow.id}
       `
 
