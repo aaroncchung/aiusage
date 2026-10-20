@@ -72,18 +72,35 @@ export function deletePositionalCounterpart(db: Database.Database, tc: ToolCallR
 /**
  * Delete the call that `tc`'s record adopted from its copy for the same
  * `tool_use` block. `foldRecordCopy` keeps a Claude Code copy's calls under
- * the original record, still under ids built from the copy's id (`copyId`,
- * see `RereadRecordIds.copyIdOf`); `tc` writes that block under the record's
- * own id, so the adopted row would count the call twice. A copy written
- * before calls were keyed on their block (v1.5.22) holds the call under its
- * positional id, matched as `deletePositionalCounterpart` matches one.
- * Returns the number of rows deleted.
+ * the original record, still under ids built from the copy's id (`copy`, see
+ * `RereadRecordIds.copyOf`); `tc`, read from line `lineOffset` of
+ * `sourceFile`, writes that block under the record's own id, so the adopted
+ * row would count the call twice.
+ *
+ * A copy written before calls were keyed on their block (v1.5.22) holds the
+ * calls of the line it was stored from under positional ids. Another block
+ * of the message can share a call's name, timestamp and index, so such a row
+ * is this call only when `tc` comes from that very line, the rule
+ * `deletePositionalCounterpart` follows for the record's own rows. Returns
+ * the number of rows deleted.
  */
-export function deleteAdoptedToolCall(db: Database.Database, tc: ToolCallRecord, copyId: string | undefined): number {
-  if (!tc.recordId || !copyId || !tc.blockKey) return 0
+export function deleteAdoptedToolCall(
+  db: Database.Database,
+  tc: ToolCallRecord,
+  copy: { id: string; sourceFile?: string; lineOffset?: number } | undefined,
+  sourceFile: string,
+  lineOffset: number,
+): number {
+  if (!tc.recordId || !copy || !tc.blockKey) return 0
   const remove = db.prepare('DELETE FROM tool_calls WHERE id = ? AND record_id = ?')
-  return remove.run(generateBlockToolCallId(copyId, tc.blockKey), tc.recordId).changes
-    + remove.run(generateToolCallId(copyId, tc.name, tc.ts, tc.callIndex), tc.recordId).changes
+  let deleted = remove.run(generateBlockToolCallId(copy.id, tc.blockKey), tc.recordId).changes
+  if (copy.sourceFile === sourceFile && copy.lineOffset === lineOffset) {
+    const names = tc.name.startsWith('skill__') ? [tc.name, 'Skill', 'skill__unknown'] : [tc.name]
+    for (const name of new Set(names)) {
+      deleted += remove.run(generateToolCallId(copy.id, name, tc.ts, tc.callIndex), tc.recordId).changes
+    }
+  }
+  return deleted
 }
 
 export function getToolCallsByRecordId(db: Database.Database, recordId: string | null): ToolCallRecord[] {

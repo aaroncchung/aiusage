@@ -934,7 +934,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
               const fromStoredLine = storedLines.get(tc.recordId!) === lineOffset && !toolCallExists.get(tc.id)
               deletePositionalCounterpart(db, tc, fromStoredLine)
             }
-            if (tc.recordId) deleteAdoptedToolCall(db, tc, recordIds.copyIdOf(tc.recordId))
+            if (tc.recordId) deleteAdoptedToolCall(db, tc, recordIds.copyOf(tc.recordId), filePath, lineOffset)
             insertToolCall(db, tc)
           }
         })()

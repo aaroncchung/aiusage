@@ -419,6 +419,22 @@ export function backfillUnknownDeviceInstanceId(db: Database.Database, deviceIns
   })()
 }
 
+/**
+ * The row a release without `recordIdsForReread` stored for a record a
+ * second time, under the device's own id.
+ */
+export interface RecordCopy {
+  /** The copy's id. */
+  id: string
+  /**
+   * Where the copy was stored (`source_file`, `line_offset`), when this parse
+   * found it and folded it into the original. A copy written before tool
+   * calls were keyed on their block (v1.5.22) holds the calls of that line.
+   */
+  sourceFile?: string
+  lineOffset?: number
+}
+
 /** The record ids of one parse: see `recordIdsForReread`. */
 export interface RereadRecordIds {
   /** Builds a record's id; pass it to the importers as their `recordId`. */
@@ -427,10 +443,10 @@ export interface RereadRecordIds {
    * For an id `recordId` returned from the `'unknown'` sentinel, the id the
    * same record has under the device's own id: the id of the copy that a
    * release without this lookup stored. `foldRecordCopy` keeps a Claude Code
-   * copy's calls under the original, still under ids built from this one
+   * copy's calls under the original, still under ids built from the copy's
    * (see `deleteAdoptedToolCall`).
    */
-  copyIdOf(id: string): string | undefined
+  copyOf(id: string): RecordCopy | undefined
 }
 
 /**
@@ -453,16 +469,16 @@ export interface RereadRecordIds {
  */
 export function recordIdsForReread(db: Database.Database, deviceInstanceId: string): RereadRecordIds {
   if (!deviceInstanceId || deviceInstanceId === UNKNOWN_DEVICE_INSTANCE_ID) {
-    return { recordId: (seed, offset) => generateRecordId(deviceInstanceId, seed, offset), copyIdOf: () => undefined }
+    return { recordId: (seed, offset) => generateRecordId(deviceInstanceId, seed, offset), copyOf: () => undefined }
   }
   const stored = db.prepare(`
-    SELECT 1 FROM records
+    SELECT source_file, line_offset FROM records
     WHERE id = ? AND ${LOCAL_RECORDS_WHERE} AND device_instance_id IN (?, '${UNKNOWN_DEVICE_INSTANCE_ID}')
   `)
   // Every line of a message, and every pass over a line before the
   // watermark, asks for the same id: answer each seed once per parse.
   const resolved = new Map<string, string>()
-  const copyIds = new Map<string, string>()
+  const copies = new Map<string, RecordCopy>()
   return {
     recordId: (seed, offset) => {
       const key = `${seed}\0${offset}`
@@ -473,13 +489,18 @@ export function recordIdsForReread(db: Database.Database, deviceInstanceId: stri
       let result = id
       if (stored.get(sentinelId, deviceInstanceId)) {
         result = sentinelId
-        copyIds.set(sentinelId, id)
-        if (stored.get(id, deviceInstanceId)) foldRecordCopy(db, id, sentinelId)
+        const copy: RecordCopy = { id }
+        const place = stored.get(id, deviceInstanceId) as { source_file: string; line_offset: number } | undefined
+        if (place && foldRecordCopy(db, id, sentinelId)) {
+          copy.sourceFile = place.source_file
+          copy.lineOffset = place.line_offset
+        }
+        copies.set(sentinelId, copy)
       }
       resolved.set(key, result)
       return result
     },
-    copyIdOf: (id) => copyIds.get(id),
+    copyOf: (id) => copies.get(id),
   }
 }
 

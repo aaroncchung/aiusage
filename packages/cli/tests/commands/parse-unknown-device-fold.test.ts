@@ -164,6 +164,32 @@ describe('folding a Claude Code copy into its original', () => {
     expect(calls()).toEqual([generateBlockToolCallId(ORIGINAL, 'b1')])
   })
 
+  it('keeps a positional call of a v1.5.22 copy that another block only resembles', async () => {
+    // Two parallel calls of one message: same name, timestamp and index.
+    const ts = '2026-09-01T00:00:00Z'
+    const first = write('a.jsonl', [line(ts, 5, 'b1')])
+    await runParse(db, 'claude-code')
+    // v1.5.22 read a resumed transcript holding the message with both calls
+    // and kept the call of its last line, b2, under a positional id. That
+    // transcript is gone since.
+    rmSync(first)
+    const resumed = write('b.jsonl', [line(ts, 5, 'b1'), line(ts, 6, 'b2')])
+    giveDevice()
+    await storeAgainAsV1523(() => runParse(db, 'claude-code'))
+    db.prepare('DELETE FROM tool_calls WHERE record_id = ?').run(COPY)
+    db.prepare('INSERT INTO tool_calls (id, record_id, name, ts, call_index) VALUES (?, ?, ?, ?, 0)')
+      .run(generateToolCallId(COPY, 'Read', Date.parse(ts), 0), COPY, 'Read', Date.parse(ts))
+    unlinkSync(resumed)
+    write('a.jsonl', [line(ts, 5, 'b1')])
+    setClaudeCodeParserVersion(undefined)
+
+    await runParse(db, 'claude-code')
+
+    // b1 is read again; b2's call came from another line and stays.
+    expect(stored()).toMatchObject({ id: ORIGINAL, output_tokens: 6 })
+    expect(calls()).toEqual([generateBlockToolCallId(ORIGINAL, 'b1'), generateToolCallId(COPY, 'Read', Date.parse(ts), 0)].sort())
+  })
+
   it('does not retract the wire id the original moves onto', async () => {
     // The message's first block was read before v1.5.22...
     const file = write('a.jsonl', [line('2026-09-01T00:00:00Z', 5, 'b1')])

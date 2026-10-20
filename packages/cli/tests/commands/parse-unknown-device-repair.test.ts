@@ -345,14 +345,14 @@ describe('recordIdsForReread', () => {
     insertRecord(db, { ...base, id: sentinel('pulled', 5), deviceInstanceId: 'other-device', origin: 'synced' })
     insertRecord(db, { ...base, id: sentinel('relabelled', 5), deviceInstanceId: DEVICE, origin: 'local' })
     insertRecord(db, { ...base, id: sentinel('not-yet-relabelled', 5), deviceInstanceId: 'unknown', origin: 'local' })
-    const { recordId, copyIdOf } = recordIdsForReread(db, DEVICE)
+    const { recordId, copyOf } = recordIdsForReread(db, DEVICE)
 
     expect(recordId('new', 5)).toBe(own('new', 5))
     expect(recordId('pulled', 5)).toBe(own('pulled', 5))
     expect(recordId('relabelled', 5)).toBe(sentinel('relabelled', 5))
     expect(recordId('not-yet-relabelled', 5)).toBe(sentinel('not-yet-relabelled', 5))
-    expect(copyIdOf(sentinel('relabelled', 5))).toBe(own('relabelled', 5))
-    expect(copyIdOf(own('new', 5))).toBeUndefined()
+    expect(copyOf(sentinel('relabelled', 5))).toEqual({ id: own('relabelled', 5) })
+    expect(copyOf(own('new', 5))).toBeUndefined()
     // Without a device id there is nothing to look up.
     expect(recordIdsForReread(db, 'unknown').recordId('relabelled', 5)).toBe(sentinel('relabelled', 5))
   })
@@ -369,7 +369,9 @@ describe('recordIdsForReread', () => {
     db.prepare('INSERT INTO sync_record_state (record_id, target, synced_at) VALUES (?, ?, 1)').run(own('m', 0), CLOUD)
     const wire = mapStatsRecordToSyncRecord({ ...base, id: own('m', 0), deviceInstanceId: DEVICE }).id
 
-    expect(recordIdsForReread(db, DEVICE).recordId('m', 0)).toBe(sentinel('m', 0))
+    const reread = recordIdsForReread(db, DEVICE)
+    expect(reread.recordId('m', 0)).toBe(sentinel('m', 0))
+    expect(reread.copyOf(sentinel('m', 0))).toEqual({ id: own('m', 0), sourceFile: '/p/s.jsonl', lineOffset: 3 })
 
     expect(ids('claude-code')).toEqual([sentinel('m', 0)])
     expect(wire).toBe(generateSyncRecordId(DEVICE, '/p/s.jsonl', 3))
