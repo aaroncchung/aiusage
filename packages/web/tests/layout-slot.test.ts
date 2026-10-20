@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { parse } from 'svelte/compiler'
+import { parse, walk } from 'svelte/compiler'
 import { describe, expect, it } from 'vitest'
 import { getAuthShellState } from '../src/lib/auth-shell.js'
 
@@ -10,21 +10,40 @@ const source = readFileSync(
 )
 
 interface Branch { condition: string; holds: boolean }
-interface FoundSlot { branches: Branch[] }
+interface FoundSlot { branches: Branch[]; keys: string[] }
 
 // Every <slot /> in the layout markup, with the {#if} conditions it sits under
-// and whether each must hold (then-branch) or fail ({:else} branch).
-function findSlots(node: any, branches: Branch[] = [], found: FoundSlot[] = []): FoundSlot[] {
+// and whether each must hold (then-branch) or fail ({:else} branch), and the
+// expressions of the {#key} blocks around it.
+function findSlots(node: any, branches: Branch[] = [], keys: string[] = [], found: FoundSlot[] = []): FoundSlot[] {
   if (!node) return found
-  if (node.type === 'Slot') found.push({ branches })
+  if (node.type === 'Slot') found.push({ branches, keys })
   if (node.type === 'IfBlock') {
     const condition = source.slice(node.expression.start, node.expression.end)
-    for (const child of node.children ?? []) findSlots(child, [...branches, { condition, holds: true }], found)
-    for (const child of node.else?.children ?? []) findSlots(child, [...branches, { condition, holds: false }], found)
+    for (const child of node.children ?? []) findSlots(child, [...branches, { condition, holds: true }], keys, found)
+    for (const child of node.else?.children ?? []) findSlots(child, [...branches, { condition, holds: false }], keys, found)
     return found
   }
-  for (const child of node.children ?? []) findSlots(child, branches, found)
-  for (const child of node.else?.children ?? []) findSlots(child, branches, found)
+  if (node.type === 'KeyBlock') keys = [...keys, source.slice(node.expression.start, node.expression.end)]
+  for (const child of node.children ?? []) findSlots(child, branches, keys, found)
+  for (const child of node.else?.children ?? []) findSlots(child, branches, keys, found)
+  return found
+}
+
+// Names of the functions in the layout script that assign `name`.
+function assignedIn(name: string): string[] {
+  const functions: string[] = []
+  const found: string[] = []
+  walk((parse(source).instance as any).content, {
+    enter(node: any) {
+      if (node.type === 'FunctionDeclaration') functions.push(node.id.name)
+      const target = node.type === 'AssignmentExpression' ? node.left : node.type === 'UpdateExpression' ? node.argument : null
+      if (target?.type === 'Identifier' && target.name === name) found.push(functions.at(-1) ?? '<top level>')
+    },
+    leave(node: any) {
+      if (node.type === 'FunctionDeclaration') functions.pop()
+    },
+  })
   return found
 }
 
@@ -63,6 +82,12 @@ describe('layout page slot (issue #109)', () => {
     for (const { condition } of slot.branches) {
       expect(evaluate(condition, whileLoading)).toBe(evaluate(condition, settled))
     }
+  })
+
+  it('mounts the page again only after an unlock, so the public home reloads with access', () => {
+    const [slot] = slots
+    expect(slot.keys).toEqual(['unlockCount'])
+    expect(assignedIn('unlockCount')).toEqual(['handleLogin'])
   })
 
   it('does not render the page on the login screen or while a protected route is checked', () => {

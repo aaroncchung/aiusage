@@ -63,6 +63,10 @@
   let authError = ''
   let authSubmitting = false
   let unlockOpen = false
+  // Bumped by a successful unlock, which mounts the page again: the public
+  // home was refused its protected requests (settings, quotas, refresh) while
+  // locked. The initial auth check never changes it.
+  let unlockCount = 0
 
   $: isHomeRoute = $page.url.pathname === '/'
   $: shellState = getAuthShellState({
@@ -93,6 +97,7 @@
     try {
       await login(password)
       authenticated = true
+      unlockCount += 1
       password = ''
       unlockOpen = false
       fetchConfig().then(applyConfig).catch(() => {})
@@ -349,7 +354,9 @@
     {/if}
 
     <main class:page-content={!shouldShowPublicHome} class:public-page-content={shouldShowPublicHome}>
-      <slot />
+      {#key unlockCount}
+        <slot />
+      {/key}
     </main>
 
   </div>
