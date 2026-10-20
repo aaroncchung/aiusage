@@ -52,10 +52,11 @@ function generation(options: { model?: string; modelId?: number; usage?: Buffer;
   return message(field(1, chatModel), field(2, Buffer.concat(options.stepIndices.map(varint))))
 }
 
-function step(ts: number, stepUsage?: Buffer): Buffer {
+function step(ts: number, stepUsage?: Buffer, model?: { modelId: number; modelName: string }): Buffer {
   return message(
     field(1, message(field(1, Math.floor(ts / 1000)), field(2, (ts % 1000) * 1_000_000))),
     stepUsage ? field(9, stepUsage) : undefined,
+    model ? field(24, message(field(1, model.modelId), field(12, model.modelName))) : undefined,
   )
 }
 
@@ -253,6 +254,47 @@ describe('parse-antigravity trailing steps (#78)', () => {
       [before[0].id, MAIN.model, 10_408],
       [after[1].id, MAIN.model, 20_000],
     ])
+  })
+
+  it('does not name other rows from a trailing step, which a generation still being written can take away', () => {
+    firstTurn()
+    insertStep(3, step(T0 + 3_000, helper('h0', 50, 4)))
+    // A step after the last generation's linked steps names the helper id but
+    // carries no usage.
+    insertStep(4, step(T0 + 4_000, undefined, { modelId: HELPER_ID, modelName: 'gemini-9.9-flash-lite' }))
+    insertGeneration(1, generation({ ...MAIN, usage: response('r1', 20_000, 300), stepIndices: [3] }))
+    const store = upsert(new Map(), parse().records)
+    expect([...store.values()].map((record) => [record.inputTokens, record.model])).toEqual([[10_408, MAIN.model], [50, `antigravity-model-${HELPER_ID}`], [20_000, MAIN.model]])
+
+    // The next generation links that step and has no usage yet: held back.
+    insertGeneration(2, generation({ ...MAIN, stepIndices: [4] }))
+    const heldBack = parse(2)
+    expect(heldBack.records).toEqual([])
+    expect(heldBack.nextIndex).toBe(2)
+    expect(contents(upsert(store, heldBack.records))).toEqual(contents(upsert(new Map(), parse().records)))
+  })
+
+  it('names a trailing step\'s own usage from the step, and other rows from it once a settled window covers it', () => {
+    firstTurn()
+    insertStep(3, step(T0 + 3_000, helper('h0', 50, 4)))
+    insertGeneration(1, generation({ ...MAIN, usage: response('r1', 20_000, 300), stepIndices: [3] }))
+    insertStep(4, step(T0 + 4_000, helper('h1', 60, 5), { modelId: HELPER_ID, modelName: 'gemini-9.9-flash-lite' }))
+    const first = parse()
+    const store = upsert(new Map(), first.records)
+    expect(first.records.map((record) => [record.inputTokens, record.model])).toEqual([
+      [10_408, MAIN.model],
+      [50, `antigravity-model-${HELPER_ID}`],
+      [20_000, MAIN.model],
+      [60, 'gemini-9.9-flash-lite'],
+    ])
+
+    insertGeneration(2, generation({ ...MAIN, stepIndices: [4] }))
+    const covered = parse(2)
+    expect(covered.nextIndex).toBe(3)
+    expect(covered.records.map((record) => [record.inputTokens, record.model])).toEqual([[50, 'gemini-9.9-flash-lite'], [60, 'gemini-9.9-flash-lite']])
+    upsert(store, covered.records)
+    expect(store.size).toBe(4)
+    expect(contents(store)).toEqual(contents(upsert(new Map(), parse().records)))
   })
 
   it('names trailing usage that carries no model id after the last settled generation', () => {

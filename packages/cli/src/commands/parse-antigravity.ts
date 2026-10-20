@@ -771,14 +771,17 @@ export function runParseAntigravity(db: Database.Database, options: AntigravityI
   const settled = latest != null && !hasUsage(latest) ? windows.slice(0, -1) : windows
   // Steps after the last window's upper bound fall in no window: usage
   // Antigravity stores after the last generation's linked steps, such as a
-  // helper-model call made after the final response (#78). They go to the
-  // last settled window, after all of its rows, which is where they sit once
-  // a later generation's window covers them. They never settle the latest
+  // helper-model call made after the final response (#78). Their usage goes
+  // to the last settled window, after all of its rows, which is where it sits
+  // once a later generation's window covers it. They never settle the latest
   // generation: usage after its linked steps is not its own. The cursor
   // counts generations and records nothing about them, so every import reads
   // them again; a record's id comes from its response identity, not its
   // window, so reading them again, or later in another window, rewrites the
-  // same records.
+  // same records. They are named as window steps are, but give no name to
+  // other rows: a later generation that is still being written can cover a
+  // trailing step without usage, and a name withdrawn that way would leave
+  // behind the records it named.
   const tail = settled[settled.length - 1]
   const trailingSteps = tail == null ? [] : [...steps.keys()].filter((index) => index > previousStep)
 
@@ -794,7 +797,7 @@ export function runParseAntigravity(db: Database.Database, options: AntigravityI
   interface ParsedRow { named: NamedModel; kind: 'generation' | 'step'; index: number }
   const parsedRows: ParsedRow[] = [
     ...settled.map((window): ParsedRow => ({ named: window.generation, kind: 'generation', index: window.generation.index })),
-    ...[...settled.flatMap((window) => window.stepIndices), ...trailingSteps].map((index): ParsedRow => ({ named: steps.get(index)!, kind: 'step', index })),
+    ...settled.flatMap((window) => window.stepIndices.map((index): ParsedRow => ({ named: steps.get(index)!, kind: 'step', index }))),
   ]
   const learned = new Map<number, string>()
   const namedBy = new Map<number, ParsedRow>()
@@ -807,7 +810,10 @@ export function runParseAntigravity(db: Database.Database, options: AntigravityI
   for (const stored of [true, false]) {
     for (const row of parsedRows) if (!row.named.inferred === stored) learn(row)
   }
-  for (const row of parsedRows) if (row.named.inferred && row.named.modelId != null) row.named.model = learned.get(row.named.modelId) ?? row.named.model
+  // A trailing step named only from a table takes a learned name too, though it teaches none.
+  for (const named of [...parsedRows.map((row) => row.named), ...trailingSteps.map((index) => steps.get(index)!)]) {
+    if (named.inferred && named.modelId != null) named.model = learned.get(named.modelId) ?? named.model
+  }
 
   // Rows this import processes: the generations from the cursor on, the steps
   // their windows cover, the steps they link — a step written for a new
