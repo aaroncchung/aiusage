@@ -141,10 +141,19 @@ function recordValuesEqual(existing: StatsRecord, incoming: StatsRecord): boolea
     && existing.cost === incoming.cost
     && existing.costSource === incoming.costSource
     && existing.sessionId === incoming.sessionId
-    && (existing.cwd ?? '') === (incoming.cwd ?? '')
+    && keptWhenEmptyEqual(existing.cwd, incoming.cwd)
     && existing.device === incoming.device
     && existing.deviceInstanceId === incoming.deviceInstanceId
-    && (existing.platform ?? '') === (incoming.platform ?? '')
+    && keptWhenEmptyEqual(existing.platform, incoming.platform)
+}
+
+/**
+ * `insertRecord` keeps a stored `cwd` or `platform` when the incoming one is
+ * empty (`KEPT_WHEN_EMPTY_COLUMNS`), so an empty incoming value changes
+ * nothing.
+ */
+function keptWhenEmptyEqual(existing: string | undefined, incoming: string | undefined): boolean {
+  return !incoming || (existing ?? '') === incoming
 }
 
 /**

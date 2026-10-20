@@ -275,6 +275,24 @@ function insertRecordsWithToolCalls(
   })()
 }
 
+/**
+ * The time of the record stored for a session, for an importer that reads
+ * every session on every run and keeps one record per session (Goose, Trae):
+ * the time its id is built from can change after it was first stored. The
+ * importer builds the id from this time with `recordId` (see
+ * `recordIdsForReread`), so it is the id the record is stored under, also
+ * one built from the `'unknown'` sentinel, whose rows `runParse` relabels
+ * before it reads anything.
+ */
+function storedSessionTime(db: Database.Database, tool: Tool, deviceInstanceId: string, sourceFile: string): (sessionId: string) => number | undefined {
+  const stored = db.prepare(`
+    SELECT ts FROM records
+    WHERE tool = ? AND ${LOCAL_RECORDS_WHERE} AND device_instance_id = ? AND source_file = ? AND session_id = ?
+    ORDER BY ts, id LIMIT 1
+  `).pluck()
+  return (sessionId) => stored.get(tool, deviceInstanceId, sourceFile, sessionId) as number | undefined
+}
+
 type RecordIds = { deviceInstanceId: string; recordId?: RecordIdBuilder }
 
 function codeFuseSnapshotRecordId(ids: RecordIds, sessionId: string): string {
@@ -1250,18 +1268,15 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           now: Date.now(),
           cursor: wm.getGooseCursor(),
           exchangeRate,
-        })
-        // A session is found again by its session id and keeps the id and
-        // time it was first stored under: both are built from its creation
-        // time, or from the time of the import when that cannot be read.
-        const storedRecord = db.prepare("SELECT id, ts FROM records WHERE tool = 'goose' AND device_instance_id = ? AND source_file = ? AND session_id = ? ORDER BY ts, id")
-        const records = result.records.map((record) => {
-          const stored = storedRecord.get(deviceInstanceId, gooseDbPath, record.sessionId) as { id: string; ts: number } | undefined
-          return stored ? { ...record, id: stored.id, ts: stored.ts } : record
+          // A session is found again by its session id and keeps the time,
+          // and so the id, it was first stored under: both are built from its
+          // creation time, or from the time of the import when that cannot be
+          // read.
+          storedTime: storedSessionTime(db, 'goose', deviceInstanceId, gooseDbPath),
         })
         // Every session is read on every run: only the records that are new
         // or changed are written and counted.
-        parsedCount += insertChangedRecords(db, records)
+        parsedCount += insertChangedRecords(db, result.records)
         if (result.nextCursor) {
           wm.setGooseCursor(result.nextCursor)
           wm.save()
@@ -1396,6 +1411,9 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
       platform: devicePlatform,
       now: Date.now(),
       lastImportedAt: traeLastImported,
+      // As for Goose: a session keeps the time, and so the id, it was first
+      // stored under.
+      storedTime: storedSessionTime(db, 'trae', deviceInstanceId, traeDbPath),
     })
     // Every session is emitted on every run: only the records that are new
     // or changed are written and counted. A Trae tool call's id is built

@@ -13,6 +13,14 @@ export interface TraeImportOptions {
   platform?: string
   now: number
   lastImportedAt?: number  // Unix ms timestamp of last import
+  /**
+   * The time of the record stored for a session, if there is one. Every
+   * session is read on every run, and its start time can change (it falls
+   * back to the earliest tag when there is no chain-start tag), so a session
+   * keeps the time it was first stored under, and with it its record id and
+   * tool-call ids, which are built from that time.
+   */
+  storedTime?: (sessionId: string) => number | undefined
 }
 
 export interface TraeImportResult {
@@ -146,11 +154,12 @@ export function runParseTrae(options: TraeImportOptions): TraeImportResult {
     const estInputTokens = session.chatTurns * 200
     const estOutputTokens = session.chatTurns * 800
 
-    const recordId = recordIdFor(options, `${dbPath}:${session.sessionId}`, session.startTs)
+    const ts = options.storedTime?.(session.sessionId) ?? session.startTs
+    const recordId = recordIdFor(options, `${dbPath}:${session.sessionId}`, ts)
 
     const record: StatsRecord = {
       id: recordId,
-      ts: session.startTs,
+      ts,
       ingestedAt: now,
       updatedAt: now,
       lineOffset: 0,
@@ -177,10 +186,10 @@ export function runParseTrae(options: TraeImportOptions): TraeImportResult {
     let callIndex = 0
     for (let i = 0; i < session.toolCalls; i++) {
       toolCalls.push({
-        id: generateRecordId(recordId, 'tool_call', session.startTs + callIndex),
+        id: generateRecordId(recordId, 'tool_call', ts + callIndex),
         recordId,
         name: 'trae-tool',
-        ts: session.startTs + callIndex,
+        ts: ts + callIndex,
         callIndex,
       })
       callIndex++

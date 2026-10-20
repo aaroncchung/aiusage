@@ -17,6 +17,13 @@ export interface GooseImportOptions {
   now: number
   cursor: GooseCursor | null
   exchangeRate?: number
+  /**
+   * The time of the record stored for a session, if there is one. Every
+   * session is read on every run, and the time a record's id is built from
+   * can change (a creation time that becomes readable, or changes), so a
+   * session keeps the time it was first stored under, and with it its id.
+   */
+  storedTime?: (sessionId: string) => number | undefined
 }
 
 export interface GooseImportResult {
@@ -90,12 +97,13 @@ export function runParseGoose(db: Database.Database, options: GooseImportOptions
     const cost = model !== 'unknown' ? calculateCost(model, tokenArgs, exchangeRate) : 0
 
     // The record id is built from the creation time, and a row whose
-    // creation time cannot be read gets the time of the import instead: the
-    // caller gives a record the id and time of the one it has stored for the
-    // session, if there is one.
+    // creation time cannot be read gets the time of the import instead. A
+    // session with a stored record keeps that record's time, and so its id.
+    const sessionId = String(row.id ?? 'unknown')
+    const ts = options.storedTime?.(sessionId) ?? parseTs(row.created_at, now)
     records.push({
-      id: recordIdFor(options, `${dbPath}:${row.id}`, parseTs(row.created_at, now)),
-      ts: parseTs(row.created_at, now),
+      id: recordIdFor(options, `${dbPath}:${row.id}`, ts),
+      ts,
       ingestedAt: now,
       updatedAt: now,
       lineOffset: 0,
@@ -109,7 +117,7 @@ export function runParseGoose(db: Database.Database, options: GooseImportOptions
       thinkingTokens: 0,
       cost,
       costSource: cost > 0 ? 'pricing' : 'unknown',
-      sessionId: String(row.id ?? 'unknown'),
+      sessionId,
       sourceFile: dbPath,
       device,
       deviceInstanceId,

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { initializeDatabase } from '../../src/db/index.js'
-import { getUnsyncedRecords, markRecordVersionsSynced } from '../../src/db/records.js'
+import { backfillUnknownDeviceInstanceId, getUnsyncedRecords, markRecordVersionsSynced } from '../../src/db/records.js'
 import { runParse } from '../../src/commands/parse.js'
 import { runParseOpenCode, MAX_PENDING_MESSAGES } from '../../src/commands/parse-opencode.js'
 import { runParseKilo } from '../../src/commands/parse-kilo.js'
@@ -1007,6 +1007,146 @@ describe('runParse counts only what a run adds or changes', () => {
       expect(cache.prepare("SELECT input_tokens FROM records WHERE tool = 'cursor'").pluck().get()).toBe(300)
       expect(cache.prepare('SELECT COUNT(*) FROM records').pluck().get()).toBe(4)
       expect(cache.prepare('SELECT COUNT(*) FROM tool_calls').pluck().get()).toBe(2)
+    } finally {
+      log.mockRestore()
+    }
+  })
+})
+
+describe('runParse and records stored before the installation had a device id', () => {
+  let cache: Database.Database
+
+  beforeEach(() => {
+    rmSync(aiusageDir, { recursive: true, force: true })
+    mkdirSync(aiusageDir, { recursive: true })
+    cache = new Database(':memory:')
+    initializeDatabase(cache)
+    open.push(cache)
+  })
+
+  function traeSource(name: string, session: string, tags: Array<{ name: string; ts: number }>): string {
+    const globalStorage = join(dir, name, 'User', 'globalStorage')
+    mkdirSync(globalStorage, { recursive: true })
+    const dbPath = join(globalStorage, 'state.vscdb')
+    writeFileSync(dbPath, '')
+    makeSnapshotRepo(join(dir, name, 'ModularData', 'ai-agent', 'snapshot', session, 'v2'), tags)
+    return dbPath
+  }
+
+  it.each([
+    ['before the run relabels them', false],
+    ['after an earlier run relabelled them', true],
+  ])('reads every source again without a second record, %s', async (_name, relabelFirst) => {
+    const opencode = sourceDb('opencode.db', MESSAGE_SCHEMA)
+    putMessage(opencode, 'oc_1', 1000, assistant(100, 10))
+    opencode.prepare('INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)').run('part_1', 'oc_1', 'sess', 1001, JSON.stringify({ type: 'tool', tool: 'read' }))
+    const kilo = sourceDb('kilo.db', MESSAGE_SCHEMA)
+    putMessage(kilo, 'kilo_1', 1000, assistant(200, 20))
+    const hermes = sourceDb('state.db', HERMES_SCHEMA)
+    hermes.prepare('INSERT INTO sessions (id, model, started_at, ended_at, input_tokens, output_tokens) VALUES (?, ?, ?, ?, ?, ?)').run('h1', 'gpt-4o', 100, 200, 300, 30)
+    hermes.prepare('INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES (?, ?, ?, ?)').run('h1', 'assistant', JSON.stringify([{ function: { name: 'grep' } }]), 150)
+    const cursorDb = sourceDb('state.vscdb', CURSOR_SCHEMA)
+    cursorDb.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run('composerData:conv', JSON.stringify({ _v: 3, composerId: 'conv', createdAt: 1_779_400_000_000, usageData: {}, fullConversationHeadersOnly: [], conversationMap: {}, status: 'none' }))
+    cursorDb.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run('bubbleId:conv:b1', JSON.stringify({ type: 2, tokenCount: { inputTokens: 400, outputTokens: 40 } }))
+    const goose = sourceDb('sessions.db', GOOSE_SCHEMA)
+    putGooseSession(goose, 'dated', '2026-07-06 08:00:00', 500, 50)
+    putGooseSession(goose, 'undated', 'not a date', 600, 60)
+    const session = 'd'.repeat(24)
+    const traeDbPath = traeSource('Trae', session, [
+      { name: `chain-start-${session}`, ts: 1_700_000_000 },
+      { name: 'before-chat-turn-1', ts: 1_700_000_010 },
+      { name: `toolcall-${session}-1`, ts: 1_700_000_011 },
+    ])
+    discovery.dbPaths = { goose: join(dir, 'sessions.db'), 'kilocode-db': join(dir, 'kilo.db'), trae: traeDbPath }
+    const options = { openCodeDbPath: join(dir, 'opencode.db'), hermesDbPath: join(dir, 'state.db'), cursorDbPath: join(dir, 'state.vscdb') }
+    const records = () => cache.prepare('SELECT id, tool, device_instance_id, input_tokens FROM records ORDER BY tool, id').all() as Array<{ id: string; tool: string; device_instance_id: string; input_tokens: number }>
+    const toolCalls = () => cache.prepare('SELECT id, record_id, name FROM tool_calls ORDER BY id').all()
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    try {
+      // No state.json yet: everything is stored under the 'unknown' sentinel.
+      await runParse(cache, undefined, options)
+      const before = records()
+      expect(before.map(r => r.tool)).toEqual(['cursor', 'goose', 'goose', 'hermes', 'kilocode', 'opencode', 'trae'])
+      expect(before.every(r => r.device_instance_id === 'unknown')).toBe(true)
+      const callsBefore = toolCalls()
+      expect(callsBefore).toHaveLength(3)
+
+      // The installation gets its device id. The watermark is gone too, so
+      // OpenCode, Kilo and Hermes read every row again, as after upgrading.
+      writeFileSync(join(aiusageDir, 'state.json'), JSON.stringify({ deviceInstanceId: DEVICE }))
+      if (relabelFirst) expect(backfillUnknownDeviceInstanceId(cache, DEVICE, 'laptop')).toBe(7)
+      rmSync(join(aiusageDir, 'watermark.json'), { force: true })
+      await runParse(cache, undefined, options)
+
+      expect(records()).toEqual(before.map(r => ({ ...r, device_instance_id: DEVICE })))
+      expect(toolCalls()).toEqual(callsBefore)
+      expect(counts(await runParse(cache, undefined, options))).toEqual([0, 0])
+      expect(records()).toHaveLength(7)
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  const counts = (result: { parsedCount: number; toolCallCount: number }) => [result.parsedCount, result.toolCallCount]
+
+  it('keeps one Trae record when a session gets an earlier start time', async () => {
+    writeFileSync(join(aiusageDir, 'state.json'), JSON.stringify({ deviceInstanceId: DEVICE }))
+    const session = 'e'.repeat(24)
+    const start = 1_700_000_000
+    // No chain-start tag: the session starts at its earliest tag.
+    const traeDbPath = traeSource('Trae', session, [
+      { name: 'before-chat-turn-1', ts: start + 10 },
+      { name: `toolcall-${session}-1`, ts: start + 11 },
+    ])
+    discovery.dbPaths = { trae: traeDbPath }
+    const records = () => cache.prepare("SELECT id, ts, output_tokens FROM records WHERE tool = 'trae'").all() as Array<{ id: string; ts: number; output_tokens: number }>
+    const toolCalls = () => cache.prepare('SELECT id, record_id, ts FROM tool_calls ORDER BY ts').all()
+
+    expect(counts(await runParse(cache, 'trae'))).toEqual([1, 1])
+    const first = records()
+    expect(first.map(r => r.ts)).toEqual([(start + 10) * 1000])
+    const callsBefore = toolCalls()
+
+    // A chain-start tag from before shows up, then the session goes on.
+    makeSnapshotRepo(join(dir, 'Trae', 'ModularData', 'ai-agent', 'snapshot', session, 'v2'), [{ name: `chain-start-${session}`, ts: start }])
+    expect(counts(await runParse(cache, 'trae'))).toEqual([0, 0])
+    expect(records()).toEqual(first)
+    expect(toolCalls()).toEqual(callsBefore)
+
+    makeSnapshotRepo(join(dir, 'Trae', 'ModularData', 'ai-agent', 'snapshot', session, 'v2'), [{ name: 'before-chat-turn-2', ts: start + 20 }])
+    expect(counts(await runParse(cache, 'trae'))).toEqual([1, 0])
+    expect(records()).toEqual([{ ...first[0], output_tokens: 2 * 800 }])
+  })
+
+  it('does not count a record read again whose only difference is an empty cwd or platform', async () => {
+    writeFileSync(join(aiusageDir, 'state.json'), JSON.stringify({ deviceInstanceId: DEVICE }))
+    writeFileSync(join(aiusageDir, 'config.json'), JSON.stringify({ platform: 'linux' }))
+    const kilo = sourceDb('kilo.db', MESSAGE_SCHEMA)
+    // Not complete yet, so it is read again on every run.
+    putMessage(kilo, 'kilo_1', 1000, assistant(100, 10, null, { path: { cwd: '/project' } }))
+    const cursorDb = sourceDb('state.vscdb', CURSOR_SCHEMA)
+    cursorDb.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run('composerData:conv', JSON.stringify({ _v: 3, composerId: 'conv', createdAt: 1_779_400_000_000, usageData: {}, fullConversationHeadersOnly: [], conversationMap: {}, status: 'none' }))
+    cursorDb.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run('bubbleId:conv:b1', JSON.stringify({ type: 2, tokenCount: { inputTokens: 400, outputTokens: 40 } }))
+    discovery.dbPaths = { 'kilocode-db': join(dir, 'kilo.db') }
+    const options = { cursorDbPath: join(dir, 'state.vscdb') }
+    const rows = () => cache.prepare('SELECT id, cwd, platform, updated_at FROM records ORDER BY tool').all()
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    try {
+      expect(counts(await runParse(cache, undefined, options))).toEqual([2, 0])
+      const first = rows()
+      expect(first).toEqual([
+        expect.objectContaining({ cwd: '', platform: 'linux' }),
+        expect.objectContaining({ cwd: '/project', platform: 'linux' }),
+      ])
+
+      // The platform is no longer configured, and the message no longer
+      // names its directory: the stored values stand.
+      writeFileSync(join(aiusageDir, 'config.json'), JSON.stringify({}))
+      putMessage(kilo, 'kilo_1', 1000, assistant(100, 10, null))
+      expect(counts(await runParse(cache, undefined, options))).toEqual([0, 0])
+      expect(rows()).toEqual(first)
     } finally {
       log.mockRestore()
     }
