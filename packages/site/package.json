@@ -8,8 +8,7 @@
     "build": "svelte-kit sync && vite build",
     "preview": "vite preview",
     "test": "svelte-kit sync && vitest run",
-    "db:migrate": "tsx src/lib/server/db/migrate.ts",
-    "db:seed": "tsx src/lib/server/db/seed.ts"
+    "db:migrate": "tsx src/lib/server/db/migrate.ts"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.8",
