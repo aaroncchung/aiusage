@@ -843,28 +843,28 @@ describe('Cursor import (#83)', () => {
   })
 })
 
-describe('Trae import (#84)', () => {
-  function makeSnapshotRepo(repoPath: string, tags: Array<{ name: string; ts: number }>): void {
-    mkdirSync(repoPath, { recursive: true })
-    const git = (args: string[], ts?: number) => {
-      const env = { ...process.env }
-      if (ts != null) {
-        env.GIT_AUTHOR_DATE = `@${ts} +0000`
-        env.GIT_COMMITTER_DATE = `@${ts} +0000`
-      }
-      const r = spawnSync('git', args, { cwd: repoPath, encoding: 'utf-8', env })
-      if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`)
+function makeSnapshotRepo(repoPath: string, tags: Array<{ name: string; ts: number }>): void {
+  mkdirSync(repoPath, { recursive: true })
+  const git = (args: string[], ts?: number) => {
+    const env = { ...process.env }
+    if (ts != null) {
+      env.GIT_AUTHOR_DATE = `@${ts} +0000`
+      env.GIT_COMMITTER_DATE = `@${ts} +0000`
     }
-    git(['init', '-q'])
-    git(['config', 'user.email', 'test@example.com'])
-    git(['config', 'user.name', 'Test'])
-    git(['config', 'commit.gpgsign', 'false'])
-    for (const { name, ts } of tags) {
-      git(['commit', '--allow-empty', '-q', '-m', name], ts)
-      git(['tag', name])
-    }
+    const r = spawnSync('git', args, { cwd: repoPath, encoding: 'utf-8', env })
+    if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`)
   }
+  git(['init', '-q'])
+  git(['config', 'user.email', 'test@example.com'])
+  git(['config', 'user.name', 'Test'])
+  git(['config', 'commit.gpgsign', 'false'])
+  for (const { name, ts } of tags) {
+    git(['commit', '--allow-empty', '-q', '-m', name], ts)
+    git(['tag', name])
+  }
+}
 
+describe('Trae import (#84)', () => {
   it('imports a session that started before one visited earlier, and follows new turns', () => {
     const globalStorage = join(dir, 'User', 'globalStorage')
     mkdirSync(globalStorage, { recursive: true })
@@ -901,5 +901,93 @@ describe('Trae import (#84)', () => {
       [one.records[1].id, 2 * 800],
     ])
     expect(two.lastImportedAt).toBe(one.lastImportedAt)
+  })
+})
+
+describe('runParse counts only what a run adds or changes', () => {
+  let cache: Database.Database
+
+  beforeEach(() => {
+    rmSync(aiusageDir, { recursive: true, force: true })
+    mkdirSync(aiusageDir, { recursive: true })
+    writeFileSync(join(aiusageDir, 'state.json'), JSON.stringify({ deviceInstanceId: DEVICE }))
+    cache = new Database(':memory:')
+    initializeDatabase(cache)
+    open.push(cache)
+  })
+
+  const counts = (result: { parsedCount: number; toolCallCount: number }) => [result.parsedCount, result.toolCallCount]
+
+  it('for an OpenCode message and a Hermes session that are read again', async () => {
+    const opencode = sourceDb('opencode.db', MESSAGE_SCHEMA)
+    const putPart = (id: string, timeCreated: number, tool: string) =>
+      opencode.prepare('INSERT OR REPLACE INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)').run(id, 'msg_1', 'sess', timeCreated, JSON.stringify({ type: 'tool', tool }))
+    // Not complete yet, so it is read again on every run.
+    putMessage(opencode, 'msg_1', 1000, assistant(100, 10, null))
+    putPart('part_1', 1001, 'read')
+    const hermes = sourceDb('state.db', HERMES_SCHEMA)
+    const putSession = (input: number) =>
+      hermes.prepare('INSERT OR REPLACE INTO sessions (id, model, started_at, ended_at, input_tokens, output_tokens) VALUES (?, ?, ?, ?, ?, ?)').run('open', 'gpt-4o', 100, null, input, 100)
+    // Open, so it is read again on every run.
+    putSession(1000)
+    hermes.prepare('INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES (?, ?, ?, ?)').run('open', 'assistant', JSON.stringify([{ function: { name: 'grep' } }]), 101)
+    const options = { openCodeDbPath: join(dir, 'opencode.db'), hermesDbPath: join(dir, 'state.db') }
+
+    expect(counts(await runParse(cache, undefined, options))).toEqual([2, 2])
+    expect(counts(await runParse(cache, undefined, options))).toEqual([0, 0])
+
+    // The message completes with one more call; the session grows.
+    putMessage(opencode, 'msg_1', 1000, assistant(200, 20))
+    putPart('part_2', 1002, 'write')
+    putSession(5000)
+    expect(counts(await runParse(cache, undefined, options))).toEqual([2, 1])
+    expect(cache.prepare('SELECT COUNT(*) FROM records').pluck().get()).toBe(2)
+    expect(cache.prepare('SELECT COUNT(*) FROM tool_calls').pluck().get()).toBe(3)
+  })
+
+  it('for Cursor conversations, Goose sessions, Kilo messages and Trae sessions that are read again', async () => {
+    const cursorDb = sourceDb('state.vscdb', CURSOR_SCHEMA)
+    const putKv = (key: string, value: unknown) =>
+      cursorDb.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run(key, JSON.stringify(value))
+    putKv('composerData:conv', { _v: 3, composerId: 'conv', createdAt: 1_779_400_000_000, usageData: {}, fullConversationHeadersOnly: [], conversationMap: {}, status: 'none' })
+    putKv('bubbleId:conv:b1', { type: 2, tokenCount: { inputTokens: 100, outputTokens: 10 } })
+    const goose = sourceDb('sessions.db', GOOSE_SCHEMA)
+    putGooseSession(goose, 's1', '2026-07-06 08:00:00', 1000, 100)
+    const kilo = sourceDb('kilo.db', MESSAGE_SCHEMA)
+    // Not complete yet, so it is read again on every run.
+    putMessage(kilo, 'kilo_1', 1000, assistant(100, 10, null))
+    const globalStorage = join(dir, 'Trae', 'User', 'globalStorage')
+    mkdirSync(globalStorage, { recursive: true })
+    const traeDbPath = join(globalStorage, 'state.vscdb')
+    writeFileSync(traeDbPath, '')
+    const session = 'c'.repeat(24)
+    const repo = join(dir, 'Trae', 'ModularData', 'ai-agent', 'snapshot', session, 'v2')
+    const start = 1_700_000_000
+    makeSnapshotRepo(repo, [
+      { name: `chain-start-${session}`, ts: start },
+      { name: 'before-chat-turn-1', ts: start + 10 },
+      { name: `toolcall-${session}-1`, ts: start + 11 },
+    ])
+    discovery.dbPaths = { goose: join(dir, 'sessions.db'), 'kilocode-db': join(dir, 'kilo.db'), trae: traeDbPath }
+    const options = { cursorDbPath: join(dir, 'state.vscdb') }
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    try {
+      expect(counts(await runParse(cache, undefined, options))).toEqual([4, 1])
+      const first = cache.prepare('SELECT id, input_tokens, updated_at FROM records ORDER BY id').all()
+      expect(counts(await runParse(cache, undefined, options))).toEqual([0, 0])
+      expect(cache.prepare('SELECT id, input_tokens, updated_at FROM records ORDER BY id').all()).toEqual(first)
+
+      // The conversation gains a bubble; the Trae session makes a tool call
+      // without a new turn, so its record stays as it is.
+      putKv('bubbleId:conv:b2', { type: 2, tokenCount: { inputTokens: 200, outputTokens: 20 } })
+      makeSnapshotRepo(repo, [{ name: `toolcall-${session}-2`, ts: start + 12 }])
+      expect(counts(await runParse(cache, undefined, options))).toEqual([1, 1])
+      expect(cache.prepare("SELECT input_tokens FROM records WHERE tool = 'cursor'").pluck().get()).toBe(300)
+      expect(cache.prepare('SELECT COUNT(*) FROM records').pluck().get()).toBe(4)
+      expect(cache.prepare('SELECT COUNT(*) FROM tool_calls').pluck().get()).toBe(2)
+    } finally {
+      log.mockRestore()
+    }
   })
 })

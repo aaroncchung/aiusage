@@ -232,26 +232,41 @@ function normalizeKiroModel(value: unknown): string {
  * nothing is stored for the record yet, what could be read is stored. The
  * importer reads such a record again, and the first complete read replaces
  * whatever is stored.
+ *
+ * A record that has not changed is left as it is (`insertChangedRecords`).
+ * Returns how many records were added or changed and how many tool calls
+ * were stored that were not stored before, so a row read again unchanged is
+ * not counted as parsed again.
  */
 function insertRecordsWithToolCalls(
   db: Database.Database,
   records: StatsRecord[],
   toolCalls: ToolCallRecord[],
   incompleteRecordIds: string[],
-): void {
+): { records: number; toolCalls: number } {
   const incomplete = new Set(incompleteRecordIds)
+  const storedToolCallIds = db.prepare('SELECT id FROM tool_calls WHERE record_id = ?').pluck()
   const removeToolCalls = db.prepare('DELETE FROM tool_calls WHERE record_id = ?')
-  const hasToolCalls = db.prepare('SELECT 1 FROM tool_calls WHERE record_id = ? LIMIT 1')
-  db.transaction(() => {
+  return db.transaction(() => {
+    const written = insertChangedRecords(db, records)
     const kept = new Set<string>()
+    const replaced = new Set<string>()
     for (const record of records) {
-      insertRecord(db, record)
-      if (!incomplete.has(record.id)) removeToolCalls.run(record.id)
-      else if (hasToolCalls.get(record.id)) kept.add(record.id)
+      const stored = storedToolCallIds.all(record.id) as string[]
+      if (incomplete.has(record.id) && stored.length > 0) {
+        kept.add(record.id)
+        continue
+      }
+      for (const id of stored) replaced.add(id)
+      removeToolCalls.run(record.id)
     }
+    let added = 0
     for (const tc of toolCalls) {
-      if (tc.recordId === null || !kept.has(tc.recordId)) insertToolCall(db, tc)
+      if (tc.recordId !== null && kept.has(tc.recordId)) continue
+      insertToolCall(db, tc)
+      if (!replaced.has(tc.id)) added++
     }
+    return { records: written, toolCalls: added }
   })()
 }
 
@@ -1036,13 +1051,13 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           exchangeRate,
         })
 
-        insertRecordsWithToolCalls(db, result.records, result.toolCalls, result.incompleteToolCallRecordIds)
+        const stored = insertRecordsWithToolCalls(db, result.records, result.toolCalls, result.incompleteToolCallRecordIds)
         if (result.nextCursor) {
           wm.setOpenCodeCursor(result.nextCursor)
           wm.save()
         }
-        parsedCount += result.records.length
-        toolCallCount += result.toolCalls.length
+        parsedCount += stored.records
+        toolCallCount += stored.toolCalls
         errors.push(...result.errors)
         onProgress({ phase: 'Parsing SQLite', tool: 'opencode', current: 1, total: 1, records: parsedCount, toolCalls: toolCallCount })
       } finally {
@@ -1070,13 +1085,13 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           exchangeRate,
         })
 
-        insertRecordsWithToolCalls(db, result.records, result.toolCalls, result.incompleteToolCallRecordIds)
+        const stored = insertRecordsWithToolCalls(db, result.records, result.toolCalls, result.incompleteToolCallRecordIds)
         if (result.nextCursor) {
           wm.setHermesCursor(result.nextCursor)
           wm.save()
         }
-        parsedCount += result.records.length
-        toolCallCount += result.toolCalls.length
+        parsedCount += stored.records
+        toolCallCount += stored.toolCalls
         errors.push(...result.errors)
         onProgress({ phase: 'Parsing SQLite', tool: 'hermes', current: 1, total: 1, records: parsedCount, toolCalls: toolCallCount })
       } finally {
@@ -1143,17 +1158,17 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           },
         })
 
-        for (const record of result.records) insertRecord(db, record)
         // A total that may be short never replaces a stored one.
         const hasRecord = db.prepare('SELECT 1 FROM records WHERE id = ?')
         const partialRecords = result.partialRecords.filter((record) => !hasRecord.get(record.id))
-        for (const record of partialRecords) insertRecord(db, record)
+        // Every conversation is read on every run: only the records that are
+        // new or changed are written and counted.
+        parsedCount += insertChangedRecords(db, [...result.records, ...partialRecords])
         for (const tc of result.toolCalls) insertToolCall(db, tc)
         if (result.nextCursor) {
           wm.setCursorCursor(result.nextCursor)
           wm.save()
         }
-        parsedCount += result.records.length + partialRecords.length
         toolCallCount += result.toolCalls.length
         errors.push(...result.errors)
         if (!cursorProgressFired) {
@@ -1184,12 +1199,13 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           exchangeRate,
         })
 
-        for (const record of result.records) insertRecord(db, record)
+        // Messages kept pending are read again: only new or changed records
+        // are written and counted.
+        parsedCount += insertChangedRecords(db, result.records)
         if (result.nextCursor) {
           wm.setKiloCursor(result.nextCursor)
           wm.save()
         }
-        parsedCount += result.records.length
 
         // 输出KiloCode统计信息
         if (result.records.length > 0) {
@@ -1234,15 +1250,17 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
         // time it was first stored under: both are built from its creation
         // time, or from the time of the import when that cannot be read.
         const storedRecord = db.prepare("SELECT id, ts FROM records WHERE tool = 'goose' AND device_instance_id = ? AND source_file = ? AND session_id = ? ORDER BY ts, id")
-        for (const record of result.records) {
+        const records = result.records.map((record) => {
           const stored = storedRecord.get(deviceInstanceId, gooseDbPath, record.sessionId) as { id: string; ts: number } | undefined
-          insertRecord(db, stored ? { ...record, id: stored.id, ts: stored.ts } : record)
-        }
+          return stored ? { ...record, id: stored.id, ts: stored.ts } : record
+        })
+        // Every session is read on every run: only the records that are new
+        // or changed are written and counted.
+        parsedCount += insertChangedRecords(db, records)
         if (result.nextCursor) {
           wm.setGooseCursor(result.nextCursor)
           wm.save()
         }
-        parsedCount += result.records.length
         errors.push(...result.errors)
         onProgress({ phase: 'Parsing SQLite', tool: 'goose', current: 1, total: 1, records: parsedCount, toolCalls: toolCallCount })
       } finally {
@@ -1374,10 +1392,17 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
       now: Date.now(),
       lastImportedAt: traeLastImported,
     })
-    for (const record of result.records) insertRecord(db, record)
-    for (const tc of result.toolCalls) insertToolCall(db, tc)
-    parsedCount += result.records.length
-    toolCallCount += result.toolCalls.length
+    // Every session is emitted on every run: only the records that are new
+    // or changed are written and counted. A Trae tool call's id is built
+    // from everything stored for it, so one that is stored already is left
+    // as it is.
+    parsedCount += insertChangedRecords(db, result.records)
+    const hasToolCall = db.prepare('SELECT 1 FROM tool_calls WHERE id = ?')
+    for (const tc of result.toolCalls) {
+      if (hasToolCall.get(tc.id)) continue
+      insertToolCall(db, tc)
+      toolCallCount++
+    }
     errors.push(...result.errors)
     if (result.lastImportedAt > traeLastImported) {
       wm.setTraeLastImported?.(result.lastImportedAt)

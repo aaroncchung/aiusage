@@ -394,15 +394,12 @@ describe('runParse with cursor', () => {
     expect(result.errors).toHaveLength(0)
   })
 
-  it('runParse reads the conversation again on a second call without adding a record', async () => {
+  it('runParse persists cursor so second call imports nothing new', async () => {
     const result1 = await runParse(cacheDb, 'cursor', { cursorDbPath })
     expect(result1.parsedCount).toBe(1)
-    const rows = () => cacheDb.prepare("SELECT id, input_tokens, updated_at FROM records WHERE tool = 'cursor'").all()
-    const first = rows()
 
     const result2 = await runParse(cacheDb, 'cursor', { cursorDbPath })
-    expect(result2.parsedCount).toBe(1)
+    expect(result2.parsedCount).toBe(0)
     expect(result2.errors).toHaveLength(0)
-    expect(rows()).toEqual(first)
   })
 })

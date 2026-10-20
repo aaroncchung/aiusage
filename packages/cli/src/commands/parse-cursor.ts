@@ -172,9 +172,9 @@ export function runParseCursor(
   // creation time while it gains bubbles, and a bubble can get its token
   // counts after it was first seen without anything else in the database
   // changing, so nothing short of reading the bubbles says whether a
-  // conversation has to be read again. A record keeps its id, so an
-  // unchanged conversation is rewritten as it is. The cursor still names the
-  // newest conversation, but no longer decides what is read.
+  // conversation has to be read again. A record keeps its id, so the caller
+  // leaves the record of an unchanged conversation as it is. The cursor still
+  // names the newest conversation, but no longer decides what is read.
   const newest = composers[composers.length - 1]
   if (cursor?.lastCreatedAt !== newest.createdAt || cursor?.lastId !== newest.composerId) {
     lastCursor = { lastCreatedAt: newest.createdAt, lastId: newest.composerId }

@@ -125,7 +125,7 @@ export function runParseTrae(options: TraeImportOptions): TraeImportResult {
 
   // Every session is emitted on every run. Its tags are read either way, a
   // session keeps gaining turns after it was first imported, and its record
-  // id is stable, so an unchanged session is rewritten as it is. Skipping by
+  // id is stable, so the caller leaves an unchanged one as it is. Skipping by
   // start time dropped every session that started before one visited earlier
   // in the same pass, and directories are listed by name, not by start time.
   const sessions: SessionTag[] = []

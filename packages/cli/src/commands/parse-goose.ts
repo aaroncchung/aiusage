@@ -72,7 +72,8 @@ export function runParseGoose(db: Database.Database, options: GooseImportOptions
   // Every session is read on every run: a session row holds running totals
   // that keep growing after it was first imported, and nothing in the row
   // says when it last changed. The table has one row per session and a
-  // record keeps its id, so an unchanged session is rewritten as it is.
+  // record keeps its id, so the caller leaves the record of an unchanged
+  // session as it is.
   for (const row of rows) {
     const createdAt = String(row.created_at ?? '')
     const id = String(row.id ?? '')
