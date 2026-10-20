@@ -7,6 +7,12 @@
 
 ## [未发布]
 
+---
+
+## [1.5.23] - 2026-10-20
+
+本版本集中修复 CLI、看板与站点中的同步、导入、定价、审核和 token 统计问题，包含 [@aaroncchung](https://github.com/aaroncchung) 贡献的 [#135](https://github.com/juliantanx/aiusage/pull/135)、[#137](https://github.com/juliantanx/aiusage/pull/137)、[#138](https://github.com/juliantanx/aiusage/pull/138)，以及 [@Fiveo9](https://github.com/Fiveo9) 贡献的 [#136](https://github.com/juliantanx/aiusage/pull/136)、[#139](https://github.com/juliantanx/aiusage/pull/139)。
+
 ### 修复
 - **在开启同步的安装上，重新计算出的费用从未反映到看板** — 看板读取本设备的用量时查 `records`，读取其他设备的用量时查 `synced_records`，但“立即重算”和 `aiusage recalc` 只更新了 `records`。当另一台设备上报的记录没有价格时——例如自定义网关上报 `$0`，或解析时该模型还没有价格——无论重算多少次，总费用、每日费用曲线和按模型的费用明细都停留在 `$0`，而底层记录其实早已是正确的金额。现在两张表会在同一个事务里写入相同的值。所属设备已发布的价格不会被改差：本地价格表找不到该模型时保留正数费用（各设备价格表本来就可以不同，“本地不知道”不是修正），所属设备上报的正数日志费用同样保留。所属设备以 `$0` 发布的记录仍会被计价，这正是本次修复的场景。已经带有该价格的记录，以及重算无法为之发声的镜像行（被重算的副本 token 数与镜像不一致，或该镜像根本没有合并副本）都不会被写入。所属设备仍保持权威：重算依然不会把来自其他设备的记录标记为已变更，因此该设备下次发布的修正仍会照常覆盖重算出的价格。在拿不到设备标识时，网页端重算现在也与命令行一致地重算所有记录，而不是跳过从其他设备合并来的记录；进度总数改为统计实际读取的行。
 - **Codex 的推理 token 被重复统计和计费**（[#138](https://github.com/juliantanx/aiusage/pull/138)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — Codex 上报的输出 token 已包含推理 token；它们既被存为输出 token，又被存为思考 token，费用也按两者计算。现在 Codex 以及嵌入 CodeFuse 的 Codex 会话保存的输出 token 不再包含推理部分。已有的本地 Codex 记录由迁移更正并重新计费，CodeFuse 日志会重新导入一次。更正后的记录会在下一次同步时再次上传。首页的 token 构成条现在把思考 token 计入输出部分。
@@ -26,6 +32,9 @@
 - **`aiusage clean` 将失败的远程清理报告为已跳过并以 0 退出** — 现在报告为失败，命令以 1 退出。
 - **菜单操作在 Windows 上没有任何效果** — 菜单在没有 shell 的情况下启动 `aiusage`，无法运行 npm 的 `aiusage.cmd` 包装脚本。现在直接通过 Node.js 运行 CLI。
 - **旧版本保存的刷新或同步间隔可能连续不停地运行** — `aiusage serve` 现在对所有已保存的值应用 1 秒和 1 分钟的最小值。
+
+### 变更
+- **贡献者链接** — Aaron C 更改 GitHub 用户名后，中英文 README 中的个人主页和提交记录链接已同步更新。
 
 ---
 
@@ -583,6 +592,7 @@
 
 ---
 
+[1.5.23]: https://github.com/juliantanx/aiusage/compare/v1.5.22...v1.5.23
 [1.5.22]: https://github.com/juliantanx/aiusage/compare/v1.5.21...v1.5.22
 [1.5.21]: https://github.com/juliantanx/aiusage/compare/v1.5.20...v1.5.21
 [1.5.20]: https://github.com/juliantanx/aiusage/compare/v1.5.19...v1.5.20

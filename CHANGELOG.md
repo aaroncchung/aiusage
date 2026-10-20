@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [1.5.23] - 2026-10-20
+
+Stabilize syncing, imports, pricing, moderation, and token accounting across the CLI, dashboard, and site. This release includes [#135](https://github.com/juliantanx/aiusage/pull/135) by [@aaroncchung](https://github.com/aaroncchung), [#136](https://github.com/juliantanx/aiusage/pull/136) by [@Fiveo9](https://github.com/Fiveo9), [#137](https://github.com/juliantanx/aiusage/pull/137) by [@aaroncchung](https://github.com/aaroncchung), [#138](https://github.com/juliantanx/aiusage/pull/138) by [@aaroncchung](https://github.com/aaroncchung), and [#139](https://github.com/juliantanx/aiusage/pull/139) by [@Fiveo9](https://github.com/Fiveo9).
+
 ### Fixed
 - **Recalculated costs never reached the dashboard on a synced installation** — the dashboard reads the current device's usage from `records` and every other device's from `synced_records`, but *Recalculate now* and `aiusage recalc` repriced `records` only. A record another device published with no price — a custom gateway reporting `$0`, or a model that had no price when it was parsed — stayed `$0` in the totals, the daily cost chart and the model breakdown however often the recalculation ran, while the row underneath already showed the correct amount. Both tables are now written with the same values, in one transaction, for every repriced row. A price the owner has published is never made worse: a positive cost is kept when the local registry cannot price the model (price lists legitimately differ between devices, and "unknown here" is not a correction), and so is a positive logged cost the owner reported. A record published at `$0` is still priced, which is the case this fixes. Rows already carrying the recalculated price, and mirrors the recalculation cannot speak for (a record whose tokens differ from the copy it repriced, or that no copy was merged for), are left alone. The owner stays authoritative: a recalculation still never marks a row from another device as changed, so that device's next correction replaces the recalculated price as usual. The web recalculation also reprices every row again when no device id is available, as the command-line recalculation does, instead of skipping records merged from other devices, and its progress total now counts the rows it reads.
 - **Codex reasoning tokens were counted and billed twice** ([#138](https://github.com/juliantanx/aiusage/pull/138) by [@aaroncchung](https://github.com/aaroncchung)) — Codex reports output tokens inclusive of reasoning tokens; they were stored as output and again as thinking tokens, and cost charged both. Output tokens are now stored without the reasoning part, for Codex and for Codex sessions embedded in CodeFuse. Existing local Codex rows are corrected by a migration and repriced, and CodeFuse logs are re-imported once. Corrected rows are uploaded again at the next sync. The home page token composition bar now counts thinking tokens in its output segment.
@@ -26,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`aiusage clean` reported a failed remote clean as skipped and exited 0** — it is reported as failed and the command exits 1.
 - **Menu actions did nothing on Windows** — the menu started `aiusage` without a shell, which cannot run the npm shim `aiusage.cmd`. It now runs the CLI through Node.js directly.
 - **A refresh or sync interval saved by an earlier release could run back to back** — `aiusage serve` now applies the 1 second and 1 minute minimums to every saved value.
+
+### Changed
+- **Contributor links** — Updated Aaron C's profile and commit-history links after the GitHub username change.
 
 ---
 
@@ -587,6 +596,7 @@ Fix multi-device sync correctness across GitHub, S3/R2, and Cloud.
 
 ---
 
+[1.5.23]: https://github.com/juliantanx/aiusage/compare/v1.5.22...v1.5.23
 [1.5.22]: https://github.com/juliantanx/aiusage/compare/v1.5.21...v1.5.22
 [1.5.21]: https://github.com/juliantanx/aiusage/compare/v1.5.20...v1.5.21
 [1.5.20]: https://github.com/juliantanx/aiusage/compare/v1.5.19...v1.5.20
