@@ -244,9 +244,12 @@ function registerLocalDayFunction(db: Database.Database): void {
   })
 }
 
-function getDateRangeFilter(range: string | null, from: string | null, to: string | null, prefix = '', weekStart: 0 | 1 = 1): { where: string; params: Record<string, unknown> } {
-  const ts = prefix ? `${prefix}.ts` : 'ts'
-
+/**
+ * Bounds of a date range in ms since epoch: `start` inclusive, `end` exclusive.
+ * A missing bound leaves that side open. The CLI's `summary` and `export` date
+ * options use it too, so they count the same local days as the dashboard.
+ */
+export function getDateRangeBounds(range: string | null, from: string | null, to: string | null, weekStart: 0 | 1 = 1): { start?: number; end?: number } {
   if (from && to) {
     // Custom ranges come from a date picker as local calendar dates (YYYY-MM-DD).
     // Preset ranges use local-time boundaries, so custom ranges must too: start at
@@ -257,7 +260,7 @@ function getDateRangeFilter(range: string | null, from: string | null, to: strin
     // 01:00, and adding a day to that would leak an hour of the following day into the range.
     const startMs = localMidnightMs(parseCalendarDate(from))
     const endMs = localMidnightMs(parseCalendarDate(to), 1)
-    return { where: `AND ${ts} >= @start AND ${ts} < @end`, params: { start: startMs, end: endMs } }
+    return { start: startMs, end: endMs }
   }
 
   const now = new Date()
@@ -268,22 +271,30 @@ function getDateRangeFilter(range: string | null, from: string | null, to: strin
     const diff = (dayOfWeek - weekStart + 7) % 7
     const startOfWeek = new Date(today)
     startOfWeek.setDate(today.getDate() - diff)
-    return { where: `AND ${ts} >= @start`, params: { start: startOfWeek.getTime() } }
+    return { start: startOfWeek.getTime() }
   }
   if (range === 'month') {
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
-    return { where: `AND ${ts} >= @start`, params: { start: startOfMonth.getTime() } }
+    return { start: startOfMonth.getTime() }
   }
   if (range === 'last30') {
     const start = new Date(today)
     start.setDate(start.getDate() - 30)
-    return { where: `AND ${ts} >= @start`, params: { start: start.getTime() } }
+    return { start: start.getTime() }
   }
   if (range === 'all') {
-    return { where: '', params: {} }
+    return {}
   }
   // default: day
-  return { where: `AND ${ts} >= @start`, params: { start: today.getTime() } }
+  return { start: today.getTime() }
+}
+
+function getDateRangeFilter(range: string | null, from: string | null, to: string | null, prefix = '', weekStart: 0 | 1 = 1): { where: string; params: Record<string, unknown> } {
+  const ts = prefix ? `${prefix}.ts` : 'ts'
+  const { start, end } = getDateRangeBounds(range, from, to, weekStart)
+  if (start === undefined) return { where: '', params: {} }
+  if (end === undefined) return { where: `AND ${ts} >= @start`, params: { start } }
+  return { where: `AND ${ts} >= @start AND ${ts} < @end`, params: { start, end } }
 }
 
 function json(res: http.ServerResponse, data: unknown, status = 200): void {

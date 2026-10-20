@@ -6,7 +6,9 @@ export interface SummaryOptions {
   device?: string
   tool?: string
   currentDeviceInstanceId?: string
+  /** Inclusive lower bound on `ts`, in ms since epoch. */
   startTs?: number
+  /** Exclusive upper bound on `ts`, in ms since epoch, as in the dashboard's date ranges. */
   endTs?: number
 }
 
@@ -35,7 +37,7 @@ export function generateSummary(db: Database.Database, options?: SummaryOptions)
   const toolParam = options?.tool ? { tool: options.tool } : {}
   const timeWhere = [
     typeof options?.startTs === 'number' ? 'AND ts >= @startTs' : '',
-    typeof options?.endTs === 'number' ? 'AND ts <= @endTs' : '',
+    typeof options?.endTs === 'number' ? 'AND ts < @endTs' : '',
   ].filter(Boolean).join(' ')
   const timeParam = {
     ...(typeof options?.startTs === 'number' ? { startTs: options.startTs } : {}),
