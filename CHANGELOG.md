@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Antigravity usage after a conversation's last generation was never imported** ([#148](https://github.com/juliantanx/aiusage/pull/148) by [@aaroncchung](https://github.com/aaroncchung)) — a step whose index is above the last generation's highest linked step fell in no generation window, so usage stored in it (a helper-model call made after the final response) was dropped unless a later generation came along. Such steps now belong to the last settled generation and are read again on every import, so usage written after a conversation was first imported is picked up too. The records keep their ids, so a later generation that covers those steps updates them in place, and a step read again unchanged is not uploaded again. Usage after a generation's linked steps never marks that generation as finished. Conversations imported before upgrading get the missing usage at the next parse; nothing is re-imported.
+
 ---
 
 ## [1.5.24] - 2026-10-21
