@@ -1,5 +1,7 @@
 import type Database from 'better-sqlite3'
-import { foldLineSeededRecordCopies } from '../records.js'
+import { AIUSAGE_DIR } from '../../config.js'
+import { getState } from '../../init.js'
+import { foldClaudeCodeCopiesOfGoneTranscripts, foldLineSeededRecordCopies } from '../records.js'
 
 /**
  * Records stored twice: under the `'unknown'` sentinel's id and under the
@@ -15,14 +17,24 @@ import { foldLineSeededRecordCopies } from '../records.js'
  * Parsing now finds the original id (`recordIdsForReread`), and every source
  * that is read again folds the copies it finds into their originals. This
  * migration removes the copies that are proven without reading the source,
- * which may be gone: those of records whose id is built from their source
- * file and line, where both ids can be rebuilt from the stored row (see
- * `foldLineSeededRecordCopies`). A copy is folded into its original rather
- * than the other way round, so the original keeps the id and the sync state
- * it has had longest; a sync target that received the copy has its wire id
- * retired.
+ * which may be gone:
+ *
+ * - those of records whose id is built from their source file and line,
+ *   where both ids can be rebuilt from the stored row (see
+ *   `foldLineSeededRecordCopies`);
+ * - Claude Code copies whose transcript is gone, proven by the two rows
+ *   stored at the same line of it (see
+ *   `foldClaudeCodeCopiesOfGoneTranscripts`). The proof needs this device's
+ *   id, which only `state.json` holds; an installation without one has no
+ *   copies.
+ *
+ * A copy is folded into its original rather than the other way round, so the
+ * original keeps the id and the sync state it has had longest; a sync target
+ * that received the copy has its wire id retired.
  */
 export function migrateV17(db: Database.Database): void {
   foldLineSeededRecordCopies(db)
+  const deviceInstanceId = getState(AIUSAGE_DIR)?.deviceInstanceId
+  if (deviceInstanceId) foldClaudeCodeCopiesOfGoneTranscripts(db, deviceInstanceId)
   db.prepare('INSERT INTO schema_version (version) VALUES (17)').run()
 }

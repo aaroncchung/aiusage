@@ -1,7 +1,9 @@
+import { existsSync } from 'node:fs'
 import type Database from 'better-sqlite3'
 import type { RecordIdBuilder, RecordOrigin, StatsRecord, Tool } from '@aiusage/core'
 import { generateRecordId, generateSyncRecordId } from '@aiusage/core'
 import { mapStatsRecordToSyncRecord, usesGeneratedWireId } from '../sync/mapper.js'
+import { hasPositionalToolCallId, type ToolCallIdRow } from './tool-calls.js'
 
 /**
  * Sentinel device id used by parsers that ran before `state.json` existed.
@@ -659,6 +661,123 @@ export function foldLineSeededRecordCopies(db: Database.Database): number {
     if (foldRecordCopy(db, row.id, originalId)) folded++
   }
   return folded
+}
+
+/** Names an earlier release gave a `Skill` call before it read the skill's name. */
+const SKILL_PLACEHOLDER_NAMES = new Set(['Skill', 'skill__unknown'])
+
+/**
+ * Claude Code records stored twice whose transcript is gone. A re-read folds
+ * a copy into its original when it reads the message (`recordIdsForReread`),
+ * but a transcript deleted since v1.5.23 stored the copy (Claude Code deletes
+ * transcripts after 30 days by default) is never read again.
+ *
+ * A Claude Code record's id is built from its message id, which is not
+ * stored, so neither id can be rebuilt from the row. A pair is folded only
+ * when the stored rows prove it is one message:
+ *
+ * - Both are local Claude Code rows of this device (the original may still
+ *   be labelled `'unknown'`), and both ids are built from a message id. A
+ *   row whose id is built from the line is a record of its own: a line
+ *   without a message id (`foldLineSeededRecordCopies` folds its copies),
+ *   or a record of a release before ids were built from the message id.
+ * - Both are stored at the same line of the same transcript (`source_file`,
+ *   `line_offset`). A record is always stored at a line of its own message,
+ *   one line belongs to one message, and Claude Code only appends to a
+ *   transcript, so the same place is the same line and the same message.
+ *   Two ids of one message were built from two device ids, and the only ones
+ *   a parse on this device stamps are `'unknown'` and its own: one row is the
+ *   original, the other the copy that a re-read under the device id stored.
+ * - Both say what that line says: the same timestamp, model and token
+ *   counts. A transcript rewritten in place would have to hold another
+ *   message's line with all of these at the same offset.
+ * - Every call of the original has its counterpart on the copy, with the
+ *   same timestamp, index and name (a `Skill` call under its skill's name).
+ *   The original was last written by a release before v1.5.23, which kept
+ *   only the calls of the line it wrote the record from, under positional
+ *   ids. The copy was written from that same line, so it holds those calls
+ *   too, and also those of the message's other lines.
+ *
+ * The row imported first is the original: rows under the `'unknown'` id were
+ * written before the installation had a device id, their copies after. The
+ * copy is folded into it (`foldRecordCopy`): they hold the same values and
+ * publish the same wire id, so the original's values, sync state and wire id
+ * stay as they are and nothing is retracted. The original's calls are
+ * replaced by the copy's, which hold every one of them.
+ *
+ * A transcript that still exists is left to the re-read, which folds the
+ * copy with what it reads. Returns the number of copies removed.
+ */
+export function foldClaudeCodeCopiesOfGoneTranscripts(db: Database.Database, deviceInstanceId: string): number {
+  if (!deviceInstanceId || deviceInstanceId === UNKNOWN_DEVICE_INSTANCE_ID) return 0
+  const owned = `${LOCAL_RECORDS_WHERE} AND tool = 'claude-code' AND device_instance_id IN (@device, '${UNKNOWN_DEVICE_INSTANCE_ID}')`
+  const shared = db.prepare(`
+    SELECT 1 FROM records WHERE ${owned}
+    GROUP BY source_file, line_offset HAVING COUNT(*) >= 2 LIMIT 1
+  `).get({ device: deviceInstanceId })
+  if (!shared) return 0
+
+  // Every row at once, by place: a lookup per place would scan this
+  // device's rows once per place.
+  const byPlace = new Map<string, StatsRecord[]>()
+  for (const row of db.prepare(`SELECT * FROM records WHERE ${owned} ORDER BY ingested_at, id`).all({ device: deviceInstanceId }) as Record<string, unknown>[]) {
+    const record = mapRowToRecord(row)
+    const key = `${record.sourceFile}\0${record.lineOffset}`
+    const rows = byPlace.get(key)
+    if (rows) rows.push(record)
+    else byPlace.set(key, [record])
+  }
+  const callsOf = db.prepare('SELECT id, record_id, name, ts, call_index FROM tool_calls WHERE record_id = ?')
+  const removeCall = db.prepare('DELETE FROM tool_calls WHERE id = ? AND record_id = ?')
+  const gone = new Map<string, boolean>()
+  let folded = 0
+  for (const placed of byPlace.values()) {
+    if (placed.length < 2) continue
+    const { sourceFile, lineOffset } = placed[0]
+    let transcriptGone = gone.get(sourceFile)
+    if (transcriptGone === undefined) gone.set(sourceFile, transcriptGone = !existsSync(sourceFile))
+    if (!transcriptGone) continue
+    // A row built from the line (a line without a message id, or a record
+    // of a release before ids were built from the message id) is a record
+    // of its own; any other row here is the line's message.
+    const lineIds = [UNKNOWN_DEVICE_INSTANCE_ID, deviceInstanceId]
+      .map(device => generateRecordId(device, sourceFile, lineOffset))
+    const rows = placed.filter(row => !lineIds.includes(row.id))
+    if (rows.length !== 2) continue
+    const [original, copy] = rows
+    const originalCalls = callsOf.all(original.id) as ToolCallIdRow[]
+    const copyCalls = callsOf.all(copy.id) as ToolCallIdRow[]
+    if (!isClaudeCodeCopyOf(copy, copyCalls, original, originalCalls, deviceInstanceId)) continue
+    db.transaction(() => {
+      if (!foldRecordCopy(db, copy.id, original.id)) return
+      for (const call of originalCalls) removeCall.run(call.id, original.id)
+      folded++
+    })()
+  }
+  return folded
+}
+
+/**
+ * True when `copy` and `original`, two Claude Code rows stored at the same
+ * line, are one message stored twice: see
+ * `foldClaudeCodeCopiesOfGoneTranscripts` for the proof.
+ */
+function isClaudeCodeCopyOf(
+  copy: StatsRecord,
+  copyCalls: ToolCallIdRow[],
+  original: StatsRecord,
+  originalCalls: ToolCallIdRow[],
+  deviceInstanceId: string,
+): boolean {
+  if (copy.id === original.id || copy.deviceInstanceId !== deviceInstanceId) return false
+  if (!(original.ingestedAt < copy.ingestedAt)) return false
+  if (original.ts !== copy.ts || original.model !== copy.model
+    || original.inputTokens !== copy.inputTokens || original.outputTokens !== copy.outputTokens
+    || original.cacheReadTokens !== copy.cacheReadTokens || original.cacheWriteTokens !== copy.cacheWriteTokens
+    || original.thinkingTokens !== copy.thinkingTokens) return false
+  return originalCalls.every(call => hasPositionalToolCallId(call) && call.ts === original.ts
+    && copyCalls.some(other => other.ts === call.ts && other.call_index === call.call_index
+      && (other.name === call.name || (SKILL_PLACEHOLDER_NAMES.has(call.name) && other.name.startsWith('skill__')))))
 }
 
 /**
