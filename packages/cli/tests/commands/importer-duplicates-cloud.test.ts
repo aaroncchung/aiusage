@@ -6,7 +6,7 @@ import { writeFileSync } from 'node:fs'
 import { generateRecordId, generateSyncRecordId } from '@aiusage/core'
 import type { StatsRecord, SyncRecord, Tool } from '@aiusage/core'
 import { initializeDatabase } from '../../src/db/index.js'
-import { getUnsyncedRecords, insertRecord, markRecordsSynced } from '../../src/db/records.js'
+import { getUnsyncedRecords, insertRecord, markRecordsSynced, recordIdsForReread } from '../../src/db/records.js'
 import { DELETED_LOCAL_ROWS } from '../../src/db/sync-claims.js'
 import {
   collapseImporterDuplicates,
@@ -334,15 +334,59 @@ describe('importer duplicates and sync targets', () => {
     expect(onServer().map(r => [r.id, r.inputTokens])).toEqual([[wire, 2500]])
   })
 
-  it('leaves the version of a kept CodeBuddy snapshot alone when it is the newest already', () => {
+  it('publishes a kept CodeBuddy snapshot again even when it is the newest version left', () => {
+    // A newer version of the wire id may have been deleted without a trace
+    // (see the next test), so the targets may hold something else.
     const earlier = oldConversation(T0, 1000, T0)
     const latest = oldConversation(T0 + 60_000, 2500, T0 + 60_000)
     for (const row of [earlier, latest]) insertRecord(db, row)
     markRecordsSynced(db, [earlier.id, latest.id], T0 + 60_000, 'cloud')
 
     expect(collapseImporterDuplicates(db).codebuddy).toBe(1)
-    expect(stored(latest.id).updated_at).toBe(T0 + 60_000)
+    expect(stored(latest.id).updated_at).toBeGreaterThan(T0 + 60_000)
+    expect(getUnsyncedRecords(db, 'cloud', DEVICE).map(r => r.id)).toEqual([latest.id])
     expect(retired()).toEqual([])
+  })
+
+  it('corrects the cloud when a newer copy of an older CodeBuddy snapshot was folded away before the repair', async () => {
+    // The first turn's snapshot was read before the device had an id (relabelled
+    // since), then the second turn's. A later read that could see only the
+    // first turn stored a copy of its snapshot under the device's id, which the
+    // cloud took as the newest version of the conversation's shared wire id.
+    const sentinel = record('codebuddy', generateRecordId('unknown', CONVERSATION, T0), CONVERSATION, T0, { inputTokens: 1000 })
+    const latest = oldConversation(T0 + 60_000, 2500, T0 + 60_000)
+    const copy = oldConversation(T0, 1000, T0 + 120_000)
+    const wire = generateSyncRecordId(DEVICE, CONVERSATION, 0)
+    // A release with the shared id builder reads the first turn again and folds the copy into the sentinel row.
+    const fold = () => recordIdsForReread(db, DEVICE).recordId(CONVERSATION, T0)
+
+    for (const foldFirst of [true, false]) {
+      db.close()
+      db = new Database(':memory:')
+      initializeDatabase(db)
+      server.clear()
+      tombstonesSent.length = 0
+      for (const row of [sentinel, latest]) insertRecord(db, row)
+      await cloudSync()
+      insertRecord(db, copy)
+      await cloudSync()
+      expect(onServer().map(r => [r.id, r.inputTokens])).toEqual([[wire, 1000]])
+
+      if (foldFirst) {
+        expect(fold()).toBe(sentinel.id)
+        expect(db.prepare('SELECT id FROM records WHERE id = ?').get(copy.id)).toBeUndefined()
+        expect(collapseImporterDuplicates(db).codebuddy).toBe(1)
+      } else {
+        expect(collapseImporterDuplicates(db).codebuddy).toBe(2)
+        fold()
+      }
+      expect(db.prepare('SELECT id, input_tokens FROM records').all()).toEqual([{ id: latest.id, input_tokens: 2500 }])
+
+      const result = await cloudSync()
+      expect(result).toMatchObject({ status: 'ok', uploadedCount: 1, retiredCount: 0 })
+      expect(tombstonesSent).toEqual([])
+      expect(onServer().map(r => [r.id, r.inputTokens])).toEqual([[wire, 2500]])
+    }
   })
 
   it('advances a kept CodeBuddy snapshot past its own acknowledgement when the clock is behind it', () => {

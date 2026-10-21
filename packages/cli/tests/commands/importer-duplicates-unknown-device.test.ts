@@ -9,6 +9,7 @@ import { initializeDatabase } from '../../src/db/index.js'
 import {
   foldLineSeededRecordCopies,
   getRecordById,
+  getUnsyncedRecords,
   insertRecord,
   markRecordsSynced,
   recordIdsForReread,
@@ -208,8 +209,10 @@ describe('the one-time importer repair and the folding of copies', () => {
    * device id, with the old, time-based ids. The rows were relabelled to the
    * device. Each source was then read again under the device's id: once with
    * the same file time (a lost watermark: a copy under the device's id of each
-   * sentinel row) and once after it grew. None of the sources exists any
-   * more. The cloud acknowledged every row.
+   * sentinel row) and once after it grew. The CodeBuddy copy of the first
+   * snapshot was stored last (a read that could see only the first turn), so
+   * it is the newest version of the conversation's shared wire id. None of
+   * the sources exists any more. The cloud acknowledged every row.
    */
   function seed(): StatsRecord[] {
     const log = join(scratch, 'gone', 'tokens_generated.jsonl')
@@ -226,10 +229,10 @@ describe('the one-time importer repair and the folding of copies', () => {
       kiro(DEVICE, 0, T0, T0 + 10), kiro(DEVICE, 80, T0, T0 + 10),
       kiro(DEVICE, 0, T1, T1), kiro(DEVICE, 80, T1, T1), kiro(DEVICE, 160, T1, T1),
       estimate('unknown', T0, 50, 100, T0), estimate(DEVICE, T0, 50, 100, T0 + 10), estimate(DEVICE, T1, 80, 150, T1),
-      snapshot('unknown', T0, 1000, T0), snapshot(DEVICE, T0, 1000, T0 + 10), snapshot(DEVICE, T1, 2500, T1),
+      snapshot('unknown', T0, 1000, T0), snapshot(DEVICE, T0, 1000, T1 + 10), snapshot(DEVICE, T1, 2500, T1),
     ]
     for (const row of rows) insertRecord(db, row)
-    markRecordsSynced(db, rows.map(row => row.id), T1 + 1, 'cloud')
+    markRecordsSynced(db, rows.map(row => row.id), T1 + 100, 'cloud')
     return rows
   }
 
@@ -247,6 +250,11 @@ describe('the one-time importer repair and the folding of copies', () => {
     expect(rows('kiro').map(r => r.input_tokens)).toEqual([100, 100, 100])
     expect(rows('cursor').map(r => [r.input_tokens, r.output_tokens])).toEqual([[80, 150]])
     expect(rows('codebuddy').map(r => r.input_tokens)).toEqual([2500])
+    // The kept snapshot is published again as the newest version of the
+    // conversation's wire id, past every version stored under it.
+    const [kept] = rows('codebuddy')
+    expect(kept.updated_at).toBeGreaterThan(Math.max(...seeded.filter(row => row.tool === 'codebuddy').map(row => row.updatedAt)))
+    expect(getUnsyncedRecords(db, 'cloud', DEVICE).map(row => row.id)).toEqual([kept.id])
     const remaining = (db.prepare('SELECT id FROM records').pluck().all() as string[]).map(id => getRecordById(db, id)!)
     const published = new Set(remaining.map(row => mapStatsRecordToSyncRecord(row).id))
     // No queued id is one a remaining row is published under...

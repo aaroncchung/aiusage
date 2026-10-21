@@ -69,18 +69,26 @@ function wireId(record: StatsRecord): string {
  *  - One is left (CodeBuddy IDE snapshots of one conversation share a wire
  *    id): retiring the id would delete the row that stands for it now, so
  *    nothing is queued. The remaining row is the correction of the deleted
- *    one, and targets and peers take a payload only when its `updatedAt` is
- *    greater than the one they hold, so its `updated_at` is moved past the
- *    deleted row's and past every acknowledgement of its own
- *    (`NEXT_UPDATED_AT`), which also makes it count as unsynced again.
+ *    ones, and targets and peers take a payload only when its `updatedAt` is
+ *    greater than the one they hold. Which version they hold cannot be told
+ *    from the rows that are left: a row of the same wire id can have been
+ *    deleted before without passing through here, such as a copy that
+ *    `foldRecordCopy` folded into its original, which keeps the original's
+ *    version. So the remaining row always becomes a new version, past the
+ *    current time, the deleted rows' versions and every acknowledgement of
+ *    its own (`NEXT_UPDATED_AT`), which also makes it count as unsynced
+ *    again: it is published once more.
  */
 export function deleteLocalRecords(db: Database.Database, ids: Iterable<string>): number {
   const targetsOf = db.prepare(`SELECT target FROM sync_record_state WHERE record_id = ?`).pluck()
   const del = db.prepare(`DELETE FROM records WHERE id = ? AND ${LOCAL_RECORDS_WHERE}`)
   const retire = db.prepare(`INSERT OR IGNORE INTO sync_retired_wire_ids (target, wire_id) VALUES (?, ?)`)
-  const advance = db.prepare(`UPDATE records SET updated_at = ${NEXT_UPDATED_AT} WHERE id = ? AND updated_at <= ?`)
+  const advance = db.prepare(`UPDATE records SET updated_at = ${NEXT_UPDATED_AT} WHERE id = ?`)
   return db.transaction(() => {
     const deleted: Array<{ record: StatsRecord; targets: string[] }> = []
+    // Each remaining row that takes over a deleted row's wire id, and the
+    // newest version deleted under it.
+    const heirs = new Map<string, number>()
     for (const id of ids) {
       const record = getRecordById(db, id)
       if (!record || record.origin !== 'local') continue
@@ -92,14 +100,15 @@ export function deleteLocalRecords(db: Database.Database, ids: Iterable<string>)
       // A wire id taken from the row's own id went with the row. A generated
       // one is derived from the source (and can equal the id of one of its
       // rows), so the rows of the source are the ones that can share it.
-      const heirs = !usesGeneratedWireId(record.tool) ? [] : getRecordsBySourceFile(db, record.sourceFile)
+      const sharing = !usesGeneratedWireId(record.tool) ? [] : getRecordsBySourceFile(db, record.sourceFile)
         .filter(other => other.origin === 'local' && wireId(other) === published)
-      if (heirs.length === 0) {
+      if (sharing.length === 0) {
         for (const target of [...targets, DELETED_LOCAL_ROWS]) retire.run(target, published)
         continue
       }
-      for (const heir of heirs) advance.run(Math.max(Date.now(), record.updatedAt + 1), heir.id, record.updatedAt)
+      for (const heir of sharing) heirs.set(heir.id, Math.max(heirs.get(heir.id) ?? 0, record.updatedAt))
     }
+    for (const [heirId, deletedVersion] of heirs) advance.run(Math.max(Date.now(), deletedVersion + 1), heirId)
     return deleted.length
   })()
 }
