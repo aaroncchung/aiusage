@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [1.5.24] - 2026-10-21
+
+Improve usage-data correctness, pricing recalculation performance, and CLI date filtering. This release includes [#142](https://github.com/juliantanx/aiusage/pull/142), [#143](https://github.com/juliantanx/aiusage/pull/143), and [#144](https://github.com/juliantanx/aiusage/pull/144) by [@aaroncchung](https://github.com/aaroncchung).
+
 ### Fixed
 - **`aiusage summary` and `aiusage export` ignored their date options** ([#144](https://github.com/juliantanx/aiusage/pull/144) by [@aaroncchung](https://github.com/aaroncchung)) — `summary --week`, `--month`, `--from` and `--to`, and `export --range`, `--from` and `--to`, were accepted and then ignored, so both commands always covered all time; the menu's "This week" and "This month" summaries showed all-time totals as well. The options now select the same local calendar days as the dashboard's date ranges: `--from` and `--to` include both days and can be given alone, `--week`, `--month` and `--range day|week|month` start where the dashboard's presets start, and the week starts on the day set in the dashboard. An invalid date, `--from` after `--to`, or options that contradict each other now end the command with a message. An export keeps its row order, and without date options both commands print exactly what they did before.
 - **`aiusage recalc` read the whole price table again for every record** ([#143](https://github.com/juliantanx/aiusage/pull/143) by [@aaroncchung](https://github.com/aaroncchung)) — for a model with no user price and no exact alias, the command loaded every active price (about 3,000 rows after a LiteLLM sync) once per record, so on a database with a few thousand such records a recalculation took 10 to 30 seconds. `aiusage recalc` and the dashboard's *Recalculate now* now run one recalculation, which prices each model once per run and reads the price table at most once; on a database of 45,000 records the command finishes in about half a second. The command also prices a Qoder record without a model as `qoder-auto`, as *Recalculate now* and the Qoder importers already did. Nothing else about the results changes: logged costs, user prices, the repricing of `synced_records` and the `updated_at` of rows pulled from other devices are handled as before.
@@ -601,6 +607,7 @@ Fix multi-device sync correctness across GitHub, S3/R2, and Cloud.
 
 ---
 
+[1.5.24]: https://github.com/juliantanx/aiusage/compare/v1.5.23...v1.5.24
 [1.5.23]: https://github.com/juliantanx/aiusage/compare/v1.5.22...v1.5.23
 [1.5.22]: https://github.com/juliantanx/aiusage/compare/v1.5.21...v1.5.22
 [1.5.21]: https://github.com/juliantanx/aiusage/compare/v1.5.20...v1.5.21

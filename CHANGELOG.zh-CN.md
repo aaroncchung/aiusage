@@ -7,6 +7,12 @@
 
 ## [未发布]
 
+---
+
+## [1.5.24] - 2026-10-21
+
+本版本改进用量数据正确性、价格重算性能和 CLI 日期筛选，包含 [@aaroncchung](https://github.com/aaroncchung) 贡献的 [#142](https://github.com/juliantanx/aiusage/pull/142)、[#143](https://github.com/juliantanx/aiusage/pull/143) 和 [#144](https://github.com/juliantanx/aiusage/pull/144)。
+
 ### 修复
 - **`aiusage summary` 和 `aiusage export` 忽略日期选项**（[#144](https://github.com/juliantanx/aiusage/pull/144)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — `summary` 的 `--week`、`--month`、`--from`、`--to`，以及 `export` 的 `--range`、`--from`、`--to` 虽然可以传入，但一直被忽略，两个命令总是统计全部时间；菜单中的“本周”“本月”摘要显示的也是全部时间的总计。现在这些选项按与看板日期范围相同的本地日历日筛选：`--from` 和 `--to` 都包含当天，并且可以单独使用；`--week`、`--month` 和 `--range day|week|month` 的起点与看板对应的预设范围相同，一周的第一天沿用看板中的设置。日期无效、`--from` 晚于 `--to`，或选项相互冲突时，命令会给出提示并退出。导出的行顺序保持不变；不带日期选项时，两个命令的输出与之前完全相同。
 - **`aiusage recalc` 为每条记录重新读取整张价格表**（[#143](https://github.com/juliantanx/aiusage/pull/143)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 对于既没有用户价格、也没有精确别名的模型，该命令会为每条记录重新加载全部有效价格（LiteLLM 同步后约 3,000 行），因此当数据库中有几千条这样的记录时，一次重算需要 10 到 30 秒。现在 `aiusage recalc` 与看板的“立即重算”执行同一个重算函数：每次运行中每个模型只定价一次，价格表最多读取一次；在一个有 45,000 条记录的数据库上，该命令约半秒即可完成。该命令现在也会把没有模型的 Qoder 记录按 `qoder-auto` 定价，与“立即重算”和 Qoder 导入器此前的做法一致。结果的其他方面不变：日志费用、用户价格、对 `synced_records` 的重新定价，以及从其他设备拉取的行的 `updated_at`，处理方式都与之前相同。
@@ -597,6 +603,7 @@
 
 ---
 
+[1.5.24]: https://github.com/juliantanx/aiusage/compare/v1.5.23...v1.5.24
 [1.5.23]: https://github.com/juliantanx/aiusage/compare/v1.5.22...v1.5.23
 [1.5.22]: https://github.com/juliantanx/aiusage/compare/v1.5.21...v1.5.22
 [1.5.21]: https://github.com/juliantanx/aiusage/compare/v1.5.20...v1.5.21
