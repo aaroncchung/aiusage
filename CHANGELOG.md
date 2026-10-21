@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Kilo and OpenCode imports skipped each other's messages** ([#146](https://github.com/juliantanx/aiusage/pull/146) by [@aaroncchung](https://github.com/aaroncchung)) — the Kilo database import started from the OpenCode cursor and wrote its own position back, so with both `kilo.db` and `opencode.db` present each run moved the shared cursor past messages the other had not read. Kilo now has its own cursor and reads `kilo.db` from the start once; `opencode.db` is also read from the start once after upgrading to pick up what was skipped. Records keep their ids, so rows already imported are updated in place.
+- **Usage that grew after the first import was never counted for Cursor, Goose, Hermes, OpenCode and Kilo** ([#146](https://github.com/juliantanx/aiusage/pull/146) by [@aaroncchung](https://github.com/aaroncchung)) — these imports moved their cursor past a conversation, session or message the first time they saw it, although its token counts were still growing: bubbles added to a Cursor conversation, later Goose session totals, the final usage of a Hermes session imported while open, and the tokens an OpenCode or Kilo response gets when it finishes were lost. Cursor conversations and Goose sessions are now read on every run, open Hermes sessions until they end, and OpenCode and Kilo messages that are not finished (or could not be read) are kept by id and read again until they are. A row read again unchanged is left as it is and stays synced; `Parsed N records` counts only records that were added or changed. A Goose session keeps one record even when its creation time becomes readable or changes later.
+- **Trae sessions were skipped depending on the order of their snapshot folders** ([#146](https://github.com/juliantanx/aiusage/pull/146) by [@aaroncchung](https://github.com/aaroncchung)) — the import raised its skip threshold while walking snapshot folders in name order, so a session that started before one visited earlier was never imported, also on the first run. Every session is now read on every run, in start-time order, and keeps one record when its start time moves.
+
 ---
 
 ## [1.5.24] - 2026-10-21

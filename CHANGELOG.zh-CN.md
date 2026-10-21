@@ -7,6 +7,11 @@
 
 ## [未发布]
 
+### 修复
+- **Kilo 与 OpenCode 的导入互相跳过对方的消息**（[#146](https://github.com/juliantanx/aiusage/pull/146)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — Kilo 数据库导入从 OpenCode 的游标开始读取，并把自己的位置写回该游标，因此同时存在 `kilo.db` 和 `opencode.db` 时，每次运行都会把共用的游标移过另一方尚未读取的消息。现在 Kilo 使用自己的游标，并会从头读取一次 `kilo.db`；升级后也会从头读取一次 `opencode.db`，以补回被跳过的消息。记录保持原有 id，已导入的行会原地更新。
+- **Cursor、Goose、Hermes、OpenCode 和 Kilo 在首次导入后增长的用量从未被统计**（[#146](https://github.com/juliantanx/aiusage/pull/146)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 这些导入在第一次看到某个会话、对话或消息时就把游标移过它，而它的 token 数仍在增长：Cursor 对话后来新增的气泡、Goose 会话之后累计的总量、导入时仍在进行的 Hermes 会话的最终用量，以及 OpenCode 或 Kilo 回复结束时才写入的 token 都会丢失。现在每次运行都会读取全部 Cursor 对话和 Goose 会话，Hermes 会话在结束前每次都会读取，尚未完成（或无法读取）的 OpenCode 和 Kilo 消息会按 id 保留并重复读取，直到完成。重新读取后未变化的行保持原样并维持已同步状态；`Parsed N records` 只统计新增或有变化的记录。Goose 会话即使之后创建时间变得可读或发生变化，也只保留一条记录。
+- **Trae 会话会因快照文件夹的顺序而被跳过**（[#146](https://github.com/juliantanx/aiusage/pull/146)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 导入在按名称顺序遍历快照文件夹时不断抬高跳过阈值，因此开始时间早于先前已遍历会话的会话永远不会被导入，首次运行也是如此。现在每次运行都会按开始时间顺序读取全部会话，会话的开始时间变化后也只保留一条记录。
+
 ---
 
 ## [1.5.24] - 2026-10-21
