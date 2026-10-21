@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { initializeDatabase } from '../../src/db/index.js'
-import { backfillUnknownDeviceInstanceId, getUnsyncedRecords, markRecordVersionsSynced } from '../../src/db/records.js'
+import { backfillUnknownDeviceInstanceId, getUnsyncedRecords, insertRecord, markRecordVersionsSynced } from '../../src/db/records.js'
+import { insertToolCall } from '../../src/db/tool-calls.js'
 import { runParse } from '../../src/commands/parse.js'
 import { runParseOpenCode, MAX_PENDING_MESSAGES } from '../../src/commands/parse-opencode.js'
 import { runParseKilo } from '../../src/commands/parse-kilo.js'
@@ -1147,6 +1148,117 @@ describe('runParse and records stored before the installation had a device id', 
       putMessage(kilo, 'kilo_1', 1000, assistant(100, 10, null))
       expect(counts(await runParse(cache, undefined, options))).toEqual([0, 0])
       expect(rows()).toEqual(first)
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it('folds a copy stored under the device id into a row it reads again, and never stores one again', async () => {
+    // Rows read on every run: unfinished OpenCode and Kilo messages, an open
+    // Hermes session, a Cursor conversation, a Goose session and a Trae
+    // session.
+    const opencode = sourceDb('opencode.db', MESSAGE_SCHEMA)
+    putMessage(opencode, 'oc_1', 1000, assistant(100, 10, null))
+    opencode.prepare('INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)').run('part_1', 'oc_1', 'sess', 1001, JSON.stringify({ type: 'tool', tool: 'read' }))
+    const kilo = sourceDb('kilo.db', MESSAGE_SCHEMA)
+    putMessage(kilo, 'kilo_1', 1000, assistant(200, 20, null))
+    const hermes = sourceDb('state.db', HERMES_SCHEMA)
+    const putHermes = (input: number) =>
+      hermes.prepare('INSERT OR REPLACE INTO sessions (id, model, started_at, ended_at, input_tokens, output_tokens) VALUES (?, ?, ?, ?, ?, ?)').run('h1', 'gpt-4o', 100, null, input, 30)
+    putHermes(300)
+    hermes.prepare('INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES (?, ?, ?, ?)').run('h1', 'assistant', JSON.stringify([{ function: { name: 'grep' } }]), 150)
+    const cursorDb = sourceDb('state.vscdb', CURSOR_SCHEMA)
+    const putKv = (key: string, value: unknown) =>
+      cursorDb.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run(key, JSON.stringify(value))
+    putKv('composerData:conv', { _v: 3, composerId: 'conv', createdAt: 1_779_400_000_000, usageData: {}, fullConversationHeadersOnly: [], conversationMap: {}, status: 'none' })
+    putKv('bubbleId:conv:b1', { type: 2, tokenCount: { inputTokens: 400, outputTokens: 40 } })
+    const goose = sourceDb('sessions.db', GOOSE_SCHEMA)
+    putGooseSession(goose, 's1', '2026-07-06 08:00:00', 500, 50)
+    const session = 'f'.repeat(24)
+    const start = 1_700_000_000
+    // No chain-start tag yet: the session starts at its earliest tag.
+    const traeDbPath = traeSource('Trae', session, [
+      { name: 'before-chat-turn-1', ts: start + 10 },
+      { name: `toolcall-${session}-1`, ts: start + 11 },
+    ])
+    const repo = join(dir, 'Trae', 'ModularData', 'ai-agent', 'snapshot', session, 'v2')
+    discovery.dbPaths = { goose: join(dir, 'sessions.db'), 'kilocode-db': join(dir, 'kilo.db'), trae: traeDbPath }
+    const options = { openCodeDbPath: join(dir, 'opencode.db'), hermesDbPath: join(dir, 'state.db'), cursorDbPath: join(dir, 'state.vscdb') }
+    const target = 'cloud:https://sync.example.test'
+    const records = () => cache.prepare('SELECT id, tool, ts, input_tokens FROM records ORDER BY tool, id').all() as Array<{ id: string; tool: string; ts: number; input_tokens: number }>
+    const toolCalls = () => cache.prepare('SELECT id, record_id, name FROM tool_calls ORDER BY id').all() as Array<{ id: string; record_id: string; name: string }>
+    const retired = () => cache.prepare('SELECT wire_id FROM sync_retired_wire_ids WHERE target = ? ORDER BY wire_id').pluck().all(target)
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    // The device name every release stamps on the rows.
+    writeFileSync(join(aiusageDir, 'config.json'), JSON.stringify({ device: 'laptop' }))
+    try {
+      // No state.json yet: everything is stored under the 'unknown' sentinel.
+      await runParse(cache, undefined, options)
+      const originals = records()
+      expect(originals.map(r => r.tool)).toEqual(['cursor', 'goose', 'hermes', 'kilocode', 'opencode', 'trae'])
+      const originalCalls = toolCalls()
+      expect(originalCalls).toHaveLength(3)
+
+      // The installation gets its device id and the rows are relabelled
+      // (v1.5.22). The sources grow, and a release that builds ids from the
+      // device id alone reads every row again (v1.5.23 without its
+      // watermark): each row is stored a second time, under the device id.
+      writeFileSync(join(aiusageDir, 'state.json'), JSON.stringify({ deviceInstanceId: DEVICE }))
+      expect(backfillUnknownDeviceInstanceId(cache, DEVICE, 'laptop')).toBe(6)
+      putMessage(opencode, 'oc_1', 1000, assistant(110, 10, null))
+      putMessage(kilo, 'kilo_1', 1000, assistant(220, 20, null))
+      putHermes(330)
+      putKv('bubbleId:conv:b2', { type: 2, tokenCount: { inputTokens: 40, outputTokens: 4 } })
+      goose.prepare('UPDATE sessions SET accumulated_input_tokens = 550, accumulated_total_tokens = 600 WHERE id = ?').run('s1')
+      makeSnapshotRepo(repo, [{ name: 'before-chat-turn-2', ts: start + 20 }])
+      const copyOf = { device: 'laptop', deviceInstanceId: DEVICE, now: NOW, cursor: null }
+      const copies = [
+        runParseOpenCode(opencode, { ...copyOf, dbPath: options.openCodeDbPath }),
+        runParseKilo(kilo, { ...copyOf, dbPath: join(dir, 'kilo.db') }),
+        runParseHermes(hermes, { ...copyOf, dbPath: options.hermesDbPath }),
+        runParseCursor(cursorDb, { ...copyOf, dbPath: options.cursorDbPath }),
+        runParseGoose(goose, { ...copyOf, dbPath: join(dir, 'sessions.db') }),
+        runParseTrae({ device: copyOf.device, deviceInstanceId: DEVICE, now: NOW, dbPath: traeDbPath }),
+      ]
+      for (const result of copies) {
+        for (const record of result.records) insertRecord(cache, record)
+        for (const tc of 'toolCalls' in result ? result.toolCalls : []) insertToolCall(cache, tc)
+      }
+      expect(records()).toHaveLength(12)
+      expect(toolCalls()).toHaveLength(6)
+      // Both were uploaded.
+      const uploaded = cache.prepare('SELECT id, updated_at AS updatedAt FROM records').all() as Array<{ id: string; updatedAt: number }>
+      markRecordVersionsSynced(cache, uploaded, target)
+      const copyIds = uploaded.map(r => r.id).filter(id => !originals.some(o => o.id === id)).sort()
+      expect(copyIds).toHaveLength(6)
+
+      // The Trae session gets a chain-start tag from before, and the Goose
+      // session's creation time is corrected: the start times no longer give
+      // the ids either row was stored under.
+      makeSnapshotRepo(repo, [{ name: `chain-start-${session}`, ts: start }])
+      goose.prepare('UPDATE sessions SET created_at = ? WHERE id = ?').run('2026-07-06 09:00:00', 's1')
+
+      expect(counts(await runParse(cache, undefined, options))).toEqual([0, 0])
+      // Each copy is folded into its original, which takes the copy's later
+      // usage and keeps its own id and time. The copies' calls go with them;
+      // the originals' stay.
+      const folded = records()
+      expect(folded.map(r => [r.id, r.ts])).toEqual(originals.map(r => [r.id, r.ts]))
+      expect(folded.map(r => r.input_tokens)).toEqual([440, 550, 330, 220, 110, 400])
+      expect(toolCalls()).toEqual(originalCalls)
+      // The copies are retracted from the target; the originals are queued
+      // again with the usage they took.
+      expect(retired()).toEqual(copyIds)
+      expect(getUnsyncedRecords(cache, target, DEVICE).map(r => r.id).sort()).toEqual(originals.map(r => r.id).sort())
+
+      // Later runs read every one of these rows again and store no copy.
+      const versions = cache.prepare('SELECT id, updated_at FROM records ORDER BY id').all()
+      expect(counts(await runParse(cache, undefined, options))).toEqual([0, 0])
+      expect(counts(await runParse(cache, undefined, options))).toEqual([0, 0])
+      expect(cache.prepare('SELECT id, updated_at FROM records ORDER BY id').all()).toEqual(versions)
+      expect(toolCalls()).toEqual(originalCalls)
+      expect(retired()).toEqual(copyIds)
     } finally {
       log.mockRestore()
     }

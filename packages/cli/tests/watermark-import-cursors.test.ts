@@ -20,9 +20,9 @@ describe('WatermarkManager import cursors', () => {
   const current = {
     grokParserVersion: 1,
     codebuddyParserVersion: 1,
-    antigravityParserVersion: 1,
-    codefuseParserVersion: 1,
-    claudeCodeParserVersion: 1,
+    antigravityParserVersion: 2,
+    codefuseParserVersion: 3,
+    claudeCodeParserVersion: 2,
   }
   const openCodeCursor = { lastMessageCreatedAt: 3000, lastMessageId: 'oc_2' }
 
