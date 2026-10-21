@@ -342,7 +342,7 @@ describe('runParse with CodeFuse data', () => {
     cacheDb.prepare('UPDATE records SET input_tokens = 1000000, cost = cost * 5, synced_at = 1, updated_at = 1 WHERE id = ?').run(fresh.id)
     const watermarkPath = join(testDir, '.aiusage', 'watermark.json')
     const watermark = JSON.parse(readFileSync(watermarkPath, 'utf-8'))
-    expect(watermark.codefuseParserVersion).toBe(2)
+    expect(watermark.codefuseParserVersion).toBe(3)
     delete watermark.codefuseParserVersion
     writeFileSync(watermarkPath, JSON.stringify(watermark))
 
@@ -356,6 +356,6 @@ describe('runParse with CodeFuse data', () => {
     const state = cacheDb.prepare('SELECT synced_at, updated_at FROM records WHERE id = ?').get(fresh.id) as any
     expect(state.synced_at).toBe(1)
     expect(state.updated_at).toBeGreaterThan(1)
-    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).codefuseParserVersion).toBe(2)
+    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).codefuseParserVersion).toBe(3)
   })
 })

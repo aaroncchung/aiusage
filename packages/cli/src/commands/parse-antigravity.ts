@@ -1,12 +1,14 @@
 import { basename } from 'node:path'
 import type Database from 'better-sqlite3'
 import type { StatsRecord } from '@aiusage/core'
-import { calculateCost, generateRecordId, inferProvider, resolvePrice } from '@aiusage/core'
+import { calculateCost, inferProvider, resolvePrice, recordIdFor, type RecordIdBuilder } from '@aiusage/core'
 
 export interface AntigravityImportOptions {
   dbPath: string
   device: string
   deviceInstanceId: string
+  /** Builds record ids (see recordIdFor); runParse passes recordIdsForReread. */
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   fallbackTs: number
@@ -868,7 +870,7 @@ export function runParseAntigravity(db: Database.Database, options: AntigravityI
     const hasPrice = resolvePrice(model) != null
     const identity = [...event.usage.identities].sort()[0] ?? event.sourceKey
     return {
-      id: generateRecordId(deviceInstanceId, `antigravity:${sessionId}:${identity}`, 0),
+      id: recordIdFor(options, `antigravity:${sessionId}:${identity}`, 0),
       // The row index, not the position in this import's output, keeps the
       // fallback the same whether the record is imported in full or in part.
       ts: event.ts ?? trajectoryTs ?? fallbackTs + event.lineOffset,

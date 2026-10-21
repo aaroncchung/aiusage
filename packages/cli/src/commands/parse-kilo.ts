@@ -1,12 +1,14 @@
 import type Database from 'better-sqlite3'
 import type { StatsRecord } from '@aiusage/core'
-import { calculateCost, generateRecordId, inferProvider } from '@aiusage/core'
+import { calculateCost, inferProvider, recordIdFor, type RecordIdBuilder } from '@aiusage/core'
 import type { OpenCodeCursor } from '../watermark.js'
 
 export interface KiloImportOptions {
   dbPath: string
   device: string
   deviceInstanceId: string
+  /** Builds record ids (see recordIdFor); runParse passes recordIdsForReread. */
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   cursor: OpenCodeCursor | null
@@ -103,7 +105,7 @@ export function runParseKilo(
     const model = parsed.modelID ?? 'unknown'
     const provider = parsed.providerID ?? inferProvider(model)
     const cwd = parsed.path?.cwd ?? ''
-    const recordId = generateRecordId(deviceInstanceId, `${dbPath}:${message.id}`, message.time_created)
+    const recordId = recordIdFor(options, `${dbPath}:${message.id}`, message.time_created)
 
     const tokenArgs = { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, thinkingTokens }
     const calculatedCost = model !== 'unknown' ? calculateCost(model, tokenArgs, exchangeRate) : 0

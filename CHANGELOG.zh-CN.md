@@ -7,6 +7,9 @@
 
 ## [未发布]
 
+### 修复
+- **v1.5.23 在获得设备 ID 之前就解析过日志的安装上重复统计用量**（[#142](https://github.com/juliantanx/aiusage/pull/142)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 记录 ID 包含设备 ID。v1.5.22 之前，未设置同步的安装以设备 ID `unknown` 解析日志；v1.5.22 为每个安装生成了真实的设备 ID，但保留了旧的记录 ID。v1.5.23 一次性重新导入 Claude Code 和 CodeFuse 日志时，又以新 ID 把此前解析过的每条消息存了第二份。再次导入的 Kelivo 备份、Kelivo 自身的数据库、不断增长的 Roo Code、Kilo Code 和 Kiro 会话文件、更新过的 Zed 对话以及丢失的 watermark 也会这样。用量和费用因此翻倍，副本会在下一次同步时上传。现在每个导入器都会找到某一条数据已有的记录。每个副本会并入原记录：原记录保留其 ID 和同步状态，并采用副本较新的读取结果及其 Claude Code 工具调用。已上传到同步目标的副本会从目标中撤回。升级后会再读取一次 Claude Code、CodeFuse 和 Antigravity 日志以找出副本。对于按行记录的日志，以及此后转录文件已被删除的 Claude Code 消息，迁移会在不读取日志的情况下移除其副本。其他来源已无法读取的副本会保留，直到再次导入该来源；Kelivo 用户请再导入一次最新的备份。
+
 ---
 
 ## [1.5.23] - 2026-10-20

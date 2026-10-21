@@ -1,5 +1,5 @@
 import type { StatsRecord } from '@aiusage/core'
-import { calculateCost, generateRecordId, inferProvider } from '@aiusage/core'
+import { calculateCost, inferProvider, recordIdFor, type RecordIdBuilder } from '@aiusage/core'
 import Database from 'better-sqlite3'
 import { closeSync, copyFileSync, createWriteStream, existsSync, mkdtempSync, openSync, readFileSync, readSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -11,6 +11,8 @@ export interface KelivoImportOptions {
   filePath: string
   device: string
   deviceInstanceId: string
+  /** Builds record ids (see recordIdFor); runParse passes recordIdsForReread. */
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   exchangeRate?: number
@@ -558,7 +560,7 @@ export async function runParseKelivo(options: KelivoImportOptions): Promise<Keli
       const cost = model !== 'unknown' ? calculateCost(model, tokenArgs, exchangeRate) : 0
 
       records.push({
-        id: generateRecordId(deviceInstanceId, sourceKey, ts),
+        id: recordIdFor(options, sourceKey, ts),
         ts,
         ingestedAt: now,
         updatedAt: now,

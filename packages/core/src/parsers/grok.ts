@@ -1,5 +1,5 @@
 import type { ParseContext, ParseResult, Parser, StatsRecord } from '../types.js'
-import { generateRecordId } from '../record-id.js'
+import { recordIdFor } from '../record-id.js'
 import { inferProvider } from '../provider.js'
 import { calculateCost, resolvePrice } from '../pricing.js'
 
@@ -169,7 +169,7 @@ export class GrokParser implements Parser {
     }
     const hasPrice = resolvePrice(turn.model) != null
     const record: StatsRecord = {
-      id: generateRecordId(turn.context.deviceInstanceId, turn.context.sourceFile, turn.lineOffset),
+      id: recordIdFor(turn.context, turn.context.sourceFile, turn.lineOffset),
       ts: turn.timestamp,
       ingestedAt: turn.context.now,
       updatedAt: turn.context.now,

@@ -1,12 +1,14 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join, basename, dirname } from 'node:path'
 import type { StatsRecord } from '@aiusage/core'
-import { generateRecordId, inferProvider, calculateCost } from '@aiusage/core'
+import { inferProvider, calculateCost, recordIdFor, type RecordIdBuilder } from '@aiusage/core'
 
 export interface CodeBuddyImportOptions {
   dataDir: string          // .../CodeBuddyExtension/Data
   device: string
   deviceInstanceId: string
+  /** Builds record ids (see recordIdFor); runParse passes recordIdsForReread. */
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   cursor?: number          // Unix ms; skip conversations last active at/before this
@@ -215,7 +217,7 @@ export function runParseCodeBuddy(options: CodeBuddyImportOptions): CodeBuddyImp
       thinkingTokens: usage.thinkingTokens,
     }
     const cost = calculateCost(usage.model, tokenArgs, exchangeRate)
-    const recordId = generateRecordId(deviceInstanceId, conversationDir, usage.ts)
+    const recordId = recordIdFor(options, conversationDir, usage.ts)
 
     records.push({
       id: recordId,

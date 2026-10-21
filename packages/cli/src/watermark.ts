@@ -8,16 +8,26 @@ const CURRENT_CODEBUDDY_PARSER_VERSION = 1
  * ids and keeps effort-qualified Gemini Pro names (issues #68, #69). Every
  * conversation database is re-imported once; records keep their ids, so the
  * re-import corrects model, provider and cost in place.
+ * v2: records parsed before the installation had a device id are stored under
+ * ids built from the 'unknown' sentinel. A re-import under the device id that
+ * v1.5.22 creates stored them a second time: v1 did so for installations that
+ * skipped from a release before it to v1.5.22 or later. Every conversation
+ * database is re-imported once more; `recordIdsForReread` finds each stored
+ * record and folds such a copy into it.
  */
-const CURRENT_ANTIGRAVITY_PARSER_VERSION = 1
+const CURRENT_ANTIGRAVITY_PARSER_VERSION = 2
 /**
  * v1: input tokens of embedded Codex sessions exclude cached tokens. Every
  * CodeFuse log is re-imported once; records keep their ids, so the re-import
  * corrects input tokens and cost in place.
  * v2: output tokens of embedded Codex sessions exclude reasoning tokens, which
  * are stored as thinking tokens. Corrected by the same one-time re-import.
+ * v3: the v1 and v2 re-imports stored every record parsed before the
+ * installation had a device id a second time (see the antigravity v2 note).
+ * Every CodeFuse log is re-imported once more to fold those copies into the
+ * records they copy.
  */
-const CURRENT_CODEFUSE_PARSER_VERSION = 2
+const CURRENT_CODEFUSE_PARSER_VERSION = 3
 
 /**
  * v1: tool calls are keyed on the tool_use block and a re-inserted record
@@ -25,8 +35,12 @@ const CURRENT_CODEFUSE_PARSER_VERSION = 2
  * to restore the calls earlier releases dropped. Records keep their ids and
  * are updated in place; `runParse` removes the old-scheme tool calls of each
  * log it reads from the start.
+ * v2: v1 stored every message parsed before the installation had a device id
+ * a second time (see the antigravity v2 note), with the restored calls on the
+ * copy. Every Claude Code log is re-imported once more: each copy is folded
+ * into the record it copies, which gets the calls.
  */
-const CURRENT_CLAUDE_CODE_PARSER_VERSION = 1
+const CURRENT_CLAUDE_CODE_PARSER_VERSION = 2
 
 export interface WatermarkEntry {
   offset: number
