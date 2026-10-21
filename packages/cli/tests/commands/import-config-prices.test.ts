@@ -37,7 +37,7 @@ describe('importConfigPriceOverrides (issue #13)', () => {
     expect(resolvePriceFromRegistry(db, 'deepseek-v4-pro')).toMatchObject({ input: 0.5, output: 1 })
   })
 
-  it('makes a migrated config price take effect on recalc of a zero-cost log record', () => {
+  it('makes a migrated config price take effect on recalc of a zero-cost log record', async () => {
     insertRecord(db, {
       id: 'r1', ts: Date.now(), ingestedAt: Date.now(), updatedAt: Date.now(),
       lineOffset: 1, tool: 'openclaw', model: 'deepseek-v4-pro', provider: 'deepseek',
@@ -47,7 +47,7 @@ describe('importConfigPriceOverrides (issue #13)', () => {
     })
 
     importConfigPriceOverrides(db, { 'deepseek-v4-pro': { input: 1, output: 2 } })
-    const result = recalcPricing(db)
+    const result = await recalcPricing(db)
     expect(result.updatedCount).toBe(1)
 
     const record = db.prepare('SELECT cost, cost_source FROM records WHERE id = ?').get('r1') as any

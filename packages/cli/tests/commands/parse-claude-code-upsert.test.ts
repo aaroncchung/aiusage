@@ -105,7 +105,7 @@ describe('runParse with Claude Code logs (#89)', () => {
   /** Make the watermark look like one written before the Claude Code parser was versioned. */
   function dropClaudeCodeParserVersion(): void {
     const watermark = JSON.parse(readFileSync(watermarkPath, 'utf-8'))
-    expect(watermark.claudeCodeParserVersion).toBe(1)
+    expect(watermark.claudeCodeParserVersion).toBe(2)
     delete watermark.claudeCodeParserVersion
     writeFileSync(watermarkPath, JSON.stringify(watermark))
   }
@@ -218,7 +218,7 @@ describe('runParse with Claude Code logs (#89)', () => {
     // Tool calls are local: restoring them does not queue the records again.
     expect(records()).toEqual(synced)
     expect(getUnsyncedRecords(db, CLOUD, DEVICE)).toEqual([])
-    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).claudeCodeParserVersion).toBe(1)
+    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).claudeCodeParserVersion).toBe(2)
 
     // A second run reads nothing again and changes nothing.
     const after = toolCalls()

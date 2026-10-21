@@ -187,7 +187,7 @@ describe('migration v15 (Codex input tokens exclude cached tokens)', () => {
     expect(row(db, 'codex-cached').input_tokens).toBe(100_000)
     expect(row(db, 'codex-cached').cost).toBeCloseTo(1.38, 10)
     const version = db.prepare('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1').get() as { version: number }
-    expect(version.version).toBe(16)
+    expect(version.version).toBe(17)
   })
 })
 
@@ -228,21 +228,21 @@ describe('corrected Codex rows replace the copies mirrored on other devices', ()
     db.close()
   })
 
-  it('recalculating pricing does not make a mirrored row look newer than its owner’s copy', () => {
+  it('recalculating pricing does not make a mirrored row look newer than its owner’s copy', async () => {
     insertSyncedRecord(db, synced({}))
     mergeSyncedRecordsIntoRecords(db, OWN)
 
-    expect(recalcPricing(db).updatedCount).toBe(1)
+    expect((await recalcPricing(db)).updatedCount).toBe(1)
 
     const r = row(db, 'remote-1')
     expect(r.cost).toBeCloseTo(1 + 1 + 0.18, 10)
     expect(r.updated_at).toBe(1000)
   })
 
-  it('still marks a locally parsed row changed when recalculating pricing', () => {
+  it('still marks a locally parsed row changed when recalculating pricing', async () => {
     insertRecord(db, makeRecord({ id: 'local-1' }))
 
-    recalcPricing(db)
+    await recalcPricing(db)
 
     expect(row(db, 'local-1').updated_at).toBeGreaterThan(5000)
   })

@@ -623,37 +623,79 @@ function priceTableFromDb(db: Database.Database): Record<string, PriceEntry> {
   return table
 }
 
-/**
- * Whether the user has explicitly configured a manual price for this exact model.
- * Used by recalc to let a user-defined price override a tool's logged cost
- * (e.g. unreliable near-zero costs reported by custom gateways). See issue #13.
- */
-export function hasUserPrice(db: Database.Database, model: string): boolean {
-  const row = db.prepare(`
-    SELECT 1 FROM model_prices
-    WHERE model_key = ? AND origin = 'user' AND status = 'active'
-    LIMIT 1
-  `).get(model)
-  return Boolean(row)
+export function resolvePriceFromRegistry(db: Database.Database, model: string): PriceEntry | undefined {
+  return createRegistryPriceLookup(db).price(model)
 }
 
-export function resolvePriceFromRegistry(db: Database.Database, model: string): PriceEntry | undefined {
+export interface RegistryPriceLookup {
+  /**
+   * The model's price: its direct user price, else the price of its exact
+   * alias, else a match in the full price table (`resolvePriceFromTable`).
+   */
+  price(model: string): PriceEntry | undefined
+  /**
+   * Whether the user has explicitly configured a manual price for this exact model.
+   * Used by recalc to let a user-defined price override a tool's logged cost
+   * (e.g. unreliable near-zero costs reported by custom gateways). See issue #13.
+   */
+  hasUserPrice(model: string): boolean
+}
+
+/**
+ * Registry lookups for one pass over many records, such as a recalculation.
+ * Each model is looked up once, and the full price table, which only a model
+ * with neither a direct user price nor an exact alias needs, is read at most
+ * once instead of once per lookup. Each answer describes the registry as it
+ * was when the model was first looked up, so make a new lookup for each pass.
+ */
+export function createRegistryPriceLookup(db: Database.Database): RegistryPriceLookup {
+  type PriceColumns = Pick<ModelPriceRow, 'input' | 'output' | 'cache_read' | 'cache_write' | 'currency'>
   const directUserPrice = db.prepare(`
     SELECT input, output, cache_read, cache_write, currency
     FROM model_prices
     WHERE model_key = ? AND origin = 'user' AND status = 'active'
-  `).get(model) as (Pick<ModelPriceRow, 'input' | 'output' | 'cache_read' | 'cache_write' | 'currency'> | undefined)
-  if (directUserPrice) return rowToPrice(directUserPrice)
-
+  `)
   const exactAlias = db.prepare(`
     SELECT p.input, p.output, p.cache_read, p.cache_write, p.currency
     FROM model_price_aliases a
     JOIN model_prices p ON p.model_key = a.model_key
     WHERE a.alias = ? AND a.enabled = 1 AND p.status = 'active'
     ORDER BY a.priority DESC LIMIT 1
-  `).get(model) as (Pick<ModelPriceRow, 'input' | 'output' | 'cache_read' | 'cache_write' | 'currency'> | undefined)
-  if (exactAlias) return rowToPrice(exactAlias)
-  return resolvePriceFromTable(model, priceTableFromDb(db))
+  `)
+  const userPrices = new Map<string, PriceEntry | null>()
+  const prices = new Map<string, PriceEntry | null>()
+  let table: Record<string, PriceEntry> | undefined
+
+  const userPrice = (model: string): PriceEntry | null => {
+    let entry = userPrices.get(model)
+    if (entry === undefined) {
+      const row = directUserPrice.get(model) as PriceColumns | undefined
+      entry = row ? rowToPrice(row) : null
+      userPrices.set(model, entry)
+    }
+    return entry
+  }
+
+  const resolve = (model: string): PriceEntry | undefined => {
+    const direct = userPrice(model)
+    if (direct) return direct
+    const alias = exactAlias.get(model) as PriceColumns | undefined
+    if (alias) return rowToPrice(alias)
+    table ??= priceTableFromDb(db)
+    return resolvePriceFromTable(model, table)
+  }
+
+  return {
+    price(model) {
+      let entry = prices.get(model)
+      if (entry === undefined) {
+        entry = resolve(model) ?? null
+        prices.set(model, entry)
+      }
+      return entry ?? undefined
+    },
+    hasUserPrice: (model) => userPrice(model) !== null,
+  }
 }
 
 function findMatch(db: Database.Database, model: string): { price: PriceEntry; row: ModelPriceRow; matchedBy: string | null } | null {
@@ -870,10 +912,11 @@ export function listLocalModelBindings(db: Database.Database): PricingLocalModel
 
 export function dryRunLocalModels(db: Database.Database): PricingSyncSummary['dryRun'] {
   const models = db.prepare("SELECT DISTINCT model FROM records WHERE model != 'unknown' ORDER BY model ASC").all() as Array<{ model: string }>
+  const prices = createRegistryPriceLookup(db)
   const unresolved: string[] = []
   let matched = 0
   for (const row of models) {
-    if (resolvePriceFromRegistry(db, row.model)) matched++
+    if (prices.price(row.model)) matched++
     else unresolved.push(row.model)
   }
   return { totalModels: models.length, matched, unresolved: unresolved.slice(0, 50) }

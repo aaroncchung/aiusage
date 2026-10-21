@@ -2,12 +2,14 @@ import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import type { StatsRecord, ToolCallRecord } from '@aiusage/core'
-import { generateRecordId } from '@aiusage/core'
+import { generateRecordId, recordIdFor, type RecordIdBuilder } from '@aiusage/core'
 
 export interface TraeImportOptions {
   dbPath: string           // state.vscdb path (used to derive data dir)
   device: string
   deviceInstanceId: string
+  /** Builds record ids (see recordIdFor); runParse passes recordIdsForReread. */
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   lastImportedAt?: number  // Unix ms timestamp of last import
@@ -138,7 +140,7 @@ export function runParseTrae(options: TraeImportOptions): TraeImportResult {
     const estInputTokens = session.chatTurns * 200
     const estOutputTokens = session.chatTurns * 800
 
-    const recordId = generateRecordId(deviceInstanceId, `${dbPath}:${session.sessionId}`, session.startTs)
+    const recordId = recordIdFor(options, `${dbPath}:${session.sessionId}`, session.startTs)
 
     const record: StatsRecord = {
       id: recordId,

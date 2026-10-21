@@ -46,7 +46,7 @@ describe('WatermarkManager CodeFuse parser version 2', () => {
     expect(wm.getEntry('codex', CODEX_FILE)?.offset).toBe(200)
 
     wm.save()
-    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).codefuseParserVersion).toBe(2)
+    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).codefuseParserVersion).toBe(3)
   })
 
   it('clears CodeFuse entries of a watermark that predates the version field', () => {
@@ -57,8 +57,8 @@ describe('WatermarkManager CodeFuse parser version 2', () => {
     expect(wm.getEntry('codex', CODEX_FILE)?.offset).toBe(200)
   })
 
-  it('keeps CodeFuse entries written by parser version 2, across reloads', () => {
-    writeWatermark(2)
+  it('keeps CodeFuse entries written by the current parser version, across reloads', () => {
+    writeWatermark(3)
 
     const wm = new WatermarkManager(watermarkPath)
     expect(wm.getEntry('codefuse', CODEFUSE_FILE)?.offset).toBe(12)
@@ -67,12 +67,12 @@ describe('WatermarkManager CodeFuse parser version 2', () => {
     expect(new WatermarkManager(watermarkPath).getEntry('codefuse', CODEFUSE_FILE)?.offset).toBe(12)
   })
 
-  it('stamps a new watermark with version 2 so nothing is re-imported later', () => {
+  it('stamps a new watermark with the current version so nothing is re-imported later', () => {
     const wm = new WatermarkManager(watermarkPath)
     wm.setEntry('codefuse', CODEFUSE_FILE, { offset: 12, size: 12, mtime: 6 })
     wm.save()
 
-    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).codefuseParserVersion).toBe(2)
+    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).codefuseParserVersion).toBe(3)
     expect(new WatermarkManager(watermarkPath).getEntry('codefuse', CODEFUSE_FILE)?.offset).toBe(12)
   })
 })

@@ -1,13 +1,15 @@
 import type Database from 'better-sqlite3'
 import { readFileSync } from 'node:fs'
 import type { StatsRecord, ToolCallRecord } from '@aiusage/core'
-import { generateRecordId } from '@aiusage/core'
+import { recordIdFor, type RecordIdBuilder } from '@aiusage/core'
 import type { CursorCursor } from '../watermark.js'
 
 export interface CursorImportOptions {
   dbPath: string
   device: string
   deviceInstanceId: string
+  /** Builds record ids (see recordIdFor); runParse passes recordIdsForReread. */
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   cursor: CursorCursor | null
@@ -219,7 +221,7 @@ export function runParseCursor(
         costSource = 'log'
       }
 
-      const recordId = generateRecordId(deviceInstanceId, `${dbPath}:${composer.composerId}`, ts)
+      const recordId = recordIdFor(options, `${dbPath}:${composer.composerId}`, ts)
 
       const record: StatsRecord = {
         id: recordId,

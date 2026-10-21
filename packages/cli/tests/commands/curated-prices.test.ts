@@ -84,7 +84,7 @@ describe('curated prices', () => {
     expect(resolvePriceFromRegistry(db, 'gpt-6-sol')).toMatchObject({ input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 })
   })
 
-  it('shows the curated price on the pricing page and recalculates records at it', () => {
+  it('shows the curated price on the pricing page and recalculates records at it', async () => {
     insertRecord(db, {
       id: 'r1', ts: Date.now(), ingestedAt: Date.now(), updatedAt: Date.now(),
       lineOffset: 1, tool: 'claude-code', model: 'claude-opus-5-5', provider: 'anthropic',
@@ -96,7 +96,7 @@ describe('curated prices', () => {
     const view = listPricingModels(db).find(model => model.model === 'claude-opus-5-5')
     expect(view).toMatchObject({ price: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 }, source: 'aiusage', matchedBy: null })
 
-    expect(recalcPricing(db).updatedCount).toBe(1)
+    expect((await recalcPricing(db)).updatedCount).toBe(1)
     const record = db.prepare("SELECT cost FROM records WHERE id = 'r1'").get() as { cost: number }
     // 1M each of input, output, cache read and cache write: 4 + 20 + 0.2 + 5
     expect(record.cost).toBeCloseTo(29.2)

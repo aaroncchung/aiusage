@@ -73,7 +73,7 @@ The container binds to `0.0.0.0` so it is reachable from outside Docker, and sta
 | `aiusage parse` | Parse supported local AI tool logs |
 | `aiusage serve` | Start the local dashboard on port `3847` |
 | `aiusage status` | Show data source and local database status |
-| `aiusage export --range month` | Export usage data |
+| `aiusage export --format csv --range month` | Export usage data |
 | `aiusage init` | Configure optional sync |
 | `aiusage github login --repo OWNER/REPO` | Connect GitHub sync with the GitHub App |
 | `aiusage sync` | Sync with the configured backend |

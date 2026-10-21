@@ -156,7 +156,7 @@ describe('Codex reasoning tokens through runParse', () => {
           cost = cost + thinking_tokens * ? / 1000000,
           synced_at = 5, updated_at = 1
     `).run(PRICE.output)
-    db.prepare('DELETE FROM schema_version WHERE version = 16').run()
+    db.prepare('DELETE FROM schema_version WHERE version >= 16').run()
     const before = db.prepare('SELECT cost, output_tokens FROM records ORDER BY session_id, line_offset LIMIT 1').get()
     // The 0.2M reasoning tokens are in both columns and billed twice.
     expect(before).toMatchObject({ output_tokens: 500_000 })
@@ -195,7 +195,7 @@ describe('Codex reasoning tokens through runParse', () => {
       [2_000, 0, 700, 0],
     ])
     expect(fresh[0].cost).toBeCloseTo(BILLED_ONCE, 10)
-    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).codefuseParserVersion).toBe(2)
+    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).codefuseParserVersion).toBe(3)
 
     // Recreate what the previous release left behind: reasoning tokens in both
     // columns, and a watermark written by CodeFuse parser version 1.
@@ -219,7 +219,7 @@ describe('Codex reasoning tokens through runParse', () => {
       expect(s.synced_at === null || s.updated_at > s.synced_at).toBe(true)
     }
     expect(db.prepare(`SELECT synced_at, updated_at FROM records WHERE tool = 'codex'`).get()).toEqual({ synced_at: 5, updated_at: 1 })
-    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).codefuseParserVersion).toBe(2)
+    expect(JSON.parse(readFileSync(watermarkPath, 'utf-8')).codefuseParserVersion).toBe(3)
 
     // Once only: the next parse leaves the rows alone.
     const settled = db.prepare('SELECT id, updated_at FROM records ORDER BY id').all()

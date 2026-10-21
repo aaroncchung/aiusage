@@ -386,9 +386,9 @@ program
   .command('recalc')
   .description('Recalculate costs')
   .option('--pricing', 'Recalculate using latest pricing')
-  .action(() => {
+  .action(async () => {
     const db = createDatabase(DB_PATH)
-    const result = recalcPricing(db, { currentDeviceInstanceId: getState(AIUSAGE_DIR)?.deviceInstanceId })
+    const result = await recalcPricing(db, { currentDeviceInstanceId: getState(AIUSAGE_DIR)?.deviceInstanceId })
     console.log(`Updated ${result.updatedCount} records, skipped ${result.skippedCount}, updated ${result.syncedUpdatedCount} synced records.`)
     db.close()
   })

@@ -1,5 +1,5 @@
 import type { Parser, ParseContext, ParseResult, StatsRecord, Tool, ToolCallRecord } from '../types.js'
-import { generateRecordId, generateToolCallId } from '../record-id.js'
+import { recordIdFor, generateToolCallId } from '../record-id.js'
 import { inferProvider } from '../provider.js'
 import { calculateCost, resolvePrice } from '../pricing.js'
 
@@ -224,7 +224,7 @@ export class GenericJsonlParser implements Parser {
       ?? normalized?.payload?.timestamp,
       context.now,
     )
-    const recordId = generateRecordId(context.deviceInstanceId, context.sourceFile, context.lineOffset)
+    const recordId = recordIdFor(context, context.sourceFile, context.lineOffset)
     const hasPrice = resolvePrice(model) != null
     const cost = hasPrice ? calculateCost(model, usage, context.exchangeRate) : 0
 
