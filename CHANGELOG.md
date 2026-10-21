@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **v1.5.23 counted usage twice on installations that parsed logs before they had a device id** ([#142](https://github.com/juliantanx/aiusage/pull/142) by [@aaroncchung](https://github.com/aaroncchung)) — record ids include the device id. Before v1.5.22 an installation without sync parsed under the device id `unknown`, and v1.5.22 gave every installation a real device id but kept the old ids. v1.5.23's one-time Claude Code and CodeFuse re-imports then stored every message parsed before that a second time, under the new id. So did Kelivo backups imported again, Kelivo's own database, growing Roo Code, Kilo Code and Kiro session files, updated Zed threads and a lost watermark. Usage and cost were doubled, and the copies were uploaded at the next sync. Every importer now finds the record a source item is already stored under. Each copy is folded into its original: the original keeps its id and sync state, and takes the copy's later reading and its Claude Code tool calls. Copies that reached a sync target are retracted from it. After upgrading, Claude Code, CodeFuse and Antigravity logs are read once more to find the copies. A migration removes the copies of line-based logs even when the log is gone. Copies whose source can no longer be read stay until it is imported again; for Kelivo, import your latest backup once.
+
 ---
 
 ## [1.5.23] - 2026-10-20
