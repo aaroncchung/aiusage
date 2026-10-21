@@ -108,7 +108,7 @@ describe('migration v16 (Codex output tokens exclude reasoning tokens)', () => {
     expect(schemaVersion(db)).toBe(16)
   })
 
-  it('bills reasoning tokens exactly once, at the output price, after repricing', () => {
+  it('bills reasoning tokens exactly once, at the output price, after repricing', async () => {
     insertRecord(db, makeRecord({ id: 'codex-reasoning' }))
 
     // The price does not exist yet while the migration runs.
@@ -122,7 +122,7 @@ describe('migration v16 (Codex output tokens exclude reasoning tokens)', () => {
     expect(pending(db)).toEqual([])
 
     // A full "Recalculate pricing" afterwards agrees.
-    recalcPricing(db)
+    await recalcPricing(db)
     expect(row(db, 'codex-reasoning').cost).toBeCloseTo(5.38, 10)
   })
 

@@ -40,7 +40,7 @@ describe('Recalc Command', () => {
     db.close()
   })
 
-  it('prices Gemini 3.1 Pro records through the curated preview alias without renaming them (issue #69)', () => {
+  it('prices Gemini 3.1 Pro records through the curated preview alias without renaming them (issue #69)', async () => {
     const models = ['gemini-3.1-pro', 'gemini-3.1-pro-high', 'gemini-3.1-pro-low']
     for (const [index, model] of models.entries()) {
       insertRecord(db, {
@@ -55,7 +55,7 @@ describe('Recalc Command', () => {
     insertPrice('gemini-3.1-pro-preview', { input: 2, output: 12, cacheRead: 0.2, provider: 'gemini' })
     expect(ensureCuratedPricingAliases(db)).toBe(3)
 
-    const result = recalcPricing(db)
+    const result = await recalcPricing(db)
     expect(result.updatedCount).toBe(3)
 
     for (const [index, model] of models.entries()) {
@@ -67,7 +67,7 @@ describe('Recalc Command', () => {
     }
   })
 
-  it('recalculates cost for pricing-sourced records', () => {
+  it('recalculates cost for pricing-sourced records', async () => {
     insertPrice('claude-sonnet-4-6', { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, provider: 'anthropic' })
 
     insertRecord(db, {
@@ -78,14 +78,14 @@ describe('Recalc Command', () => {
       sourceFile: '/f1', device: 'd1', deviceInstanceId: 'di1',
     })
 
-    const result = recalcPricing(db)
+    const result = await recalcPricing(db)
     expect(result.updatedCount).toBeGreaterThan(0)
 
     const record = db.prepare('SELECT * FROM records WHERE id = ?').get('r1') as any
     expect(record.cost).toBeGreaterThan(0.001) // Should be recalculated
   })
 
-  it('skips records with costSource = log', () => {
+  it('skips records with costSource = log', async () => {
     insertRecord(db, {
       id: 'r1', ts: Date.now(), ingestedAt: Date.now(), updatedAt: Date.now(),
       lineOffset: 100, tool: 'openclaw', model: 'test', provider: 'test',
@@ -94,11 +94,11 @@ describe('Recalc Command', () => {
       sourceFile: '/f1', device: 'd1', deviceInstanceId: 'di1',
     })
 
-    const result = recalcPricing(db)
+    const result = await recalcPricing(db)
     expect(result.skippedCount).toBe(1)
   })
 
-  it('normalizes legacy qoder tier models and recalculates cost', () => {
+  it('normalizes legacy qoder tier models and recalculates cost', async () => {
     insertPrice('qoder-ultimate', { input: 1.6, output: 1.6, cacheRead: 1.6, cacheWrite: 1.6, provider: 'qoder' })
 
     insertRecord(db, {
@@ -109,7 +109,7 @@ describe('Recalc Command', () => {
       sourceFile: '/f1', device: 'd1', deviceInstanceId: 'di1',
     })
 
-    const result = recalcPricing(db)
+    const result = await recalcPricing(db)
     expect(result.updatedCount).toBe(1)
 
     const record = db.prepare('SELECT * FROM records WHERE id = ?').get('r1') as any
@@ -119,7 +119,7 @@ describe('Recalc Command', () => {
     expect(record.cost).toBeGreaterThan(0)
   })
 
-  it('preserves a positive log-sourced cost that has no user price', () => {
+  it('preserves a positive log-sourced cost that has no user price', async () => {
     insertRecord(db, {
       id: 'r1', ts: Date.now(), ingestedAt: Date.now(), updatedAt: Date.now(),
       lineOffset: 100, tool: 'hermes', model: 'deepseek-v4-pro', provider: 'openclaw',
@@ -128,7 +128,7 @@ describe('Recalc Command', () => {
       sourceFile: '/f1', device: 'd1', deviceInstanceId: 'di1',
     })
 
-    const result = recalcPricing(db)
+    const result = await recalcPricing(db)
     expect(result.skippedCount).toBe(1)
 
     const record = db.prepare('SELECT * FROM records WHERE id = ?').get('r1') as any
@@ -136,7 +136,7 @@ describe('Recalc Command', () => {
     expect(record.cost_source).toBe('log')
   })
 
-  it('recomputes a zero log-sourced cost from the pricing registry (issue #13)', () => {
+  it('recomputes a zero log-sourced cost from the pricing registry (issue #13)', async () => {
     // Real openclaw scenario: gateway reports cost.total = 0, stored as cost_source='log'.
     insertPrice('deepseek-v4-pro', { input: 0.435, output: 0.87, provider: 'deepseek' })
 
@@ -148,7 +148,7 @@ describe('Recalc Command', () => {
       sourceFile: '/f1', device: 'd1', deviceInstanceId: 'di1',
     })
 
-    const result = recalcPricing(db)
+    const result = await recalcPricing(db)
     expect(result.updatedCount).toBe(1)
     expect(result.skippedCount).toBe(0)
 
@@ -158,7 +158,7 @@ describe('Recalc Command', () => {
     expect(record.cost_source).toBe('pricing')
   })
 
-  it('overrides log-sourced cost when the user has set a manual price (issue #13)', () => {
+  it('overrides log-sourced cost when the user has set a manual price (issue #13)', async () => {
     insertRecord(db, {
       id: 'r1', ts: Date.now(), ingestedAt: Date.now(), updatedAt: Date.now(),
       lineOffset: 100, tool: 'hermes', model: 'deepseek-v4-pro', provider: 'openclaw',
@@ -170,7 +170,7 @@ describe('Recalc Command', () => {
     // User configures a manual price via the Pricing UI for this exact model.
     setUserPrice(db, 'deepseek-v4-pro', { input: 1, output: 2 })
 
-    const result = recalcPricing(db)
+    const result = await recalcPricing(db)
     expect(result.updatedCount).toBe(1)
     expect(result.skippedCount).toBe(0)
 
@@ -180,7 +180,7 @@ describe('Recalc Command', () => {
     expect(record.cost_source).toBe('pricing')
   })
 
-  it('recalculates cost for alias-only model ids from the pricing registry', () => {
+  it('recalculates cost for alias-only model ids from the pricing registry', async () => {
     insertPrice('gpt-4o', { input: 2, output: 8, provider: 'openai', sourceModelId: 'openai/gpt-4o' })
     insertAlias('openai/gpt-4o', 'gpt-4o', 'openai')
 
@@ -192,7 +192,7 @@ describe('Recalc Command', () => {
       sourceFile: '/f1', device: 'd1', deviceInstanceId: 'di1',
     })
 
-    const result = recalcPricing(db)
+    const result = await recalcPricing(db)
     expect(result.updatedCount).toBe(1)
 
     const record = db.prepare('SELECT * FROM records WHERE id = ?').get('r1') as any
@@ -256,11 +256,11 @@ describe('Recalc Command — pulled rows', () => {
     db.close()
   })
 
-  it('writes the recalculated price into the mirror every cross-device reading uses', () => {
+  it('writes the recalculated price into the mirror every cross-device reading uses', async () => {
     insertSyncedRecord(db, synced())
     mergeSyncedRecordsIntoRecords(db, OWN)
 
-    const result = recalcPricing(db, { currentDeviceInstanceId: OWN })
+    const result = await recalcPricing(db, { currentDeviceInstanceId: OWN })
 
     expect(result.updatedCount).toBe(1)
     expect(result.syncedUpdatedCount).toBe(1)
@@ -273,7 +273,7 @@ describe('Recalc Command — pulled rows', () => {
     expect(mirroredRow().updated_at).toBe(DAY)
   })
 
-  it('fills a mirror the price never reached, without repricing the copy again', () => {
+  it('fills a mirror the price never reached, without repricing the copy again', async () => {
     insertSyncedRecord(db, synced())
     mergeSyncedRecordsIntoRecords(db, OWN)
 
@@ -281,20 +281,20 @@ describe('Recalc Command — pulled rows', () => {
     // merged copy carries the price, the mirror still the owner's.
     db.prepare('UPDATE records SET cost = 0.87, cost_source = ? WHERE id = ?').run('pricing', 'remote-1')
 
-    const result = recalcPricing(db, { currentDeviceInstanceId: OWN })
+    const result = await recalcPricing(db, { currentDeviceInstanceId: OWN })
 
     expect(result.updatedCount).toBe(0)
     expect(result.syncedUpdatedCount).toBe(1)
     expect(mirrorRow().cost).toBeCloseTo(0.87)
   })
 
-  it('keeps a price the owner published when the local registry has none', () => {
+  it('keeps a price the owner published when the local registry has none', async () => {
     // Price lists differ between devices: this one has no row for the model.
     // "Cannot price it here" is not a correction of the $4 the owner priced.
     insertSyncedRecord(db, synced({ model: 'remote-only-model', cost: 4, costSource: 'pricing' }))
     mergeSyncedRecordsIntoRecords(db, OWN)
 
-    const result = recalcPricing(db, { currentDeviceInstanceId: OWN })
+    const result = await recalcPricing(db, { currentDeviceInstanceId: OWN })
 
     expect(result.updatedCount).toBe(1)
     expect(result.syncedUpdatedCount).toBe(0)
@@ -303,14 +303,14 @@ describe('Recalc Command — pulled rows', () => {
     expect(mirrorRow()).toMatchObject({ cost: 4, cost_source: 'pricing' })
   })
 
-  it('does not override a positive logged cost the owner published, even after a manual price is removed', () => {
+  it('does not override a positive logged cost the owner published, even after a manual price is removed', async () => {
     insertSyncedRecord(db, synced({ model: 'remote-logged-model', cost: 10, costSource: 'log' }))
     mergeSyncedRecordsIntoRecords(db, OWN)
 
     // The user sets a manual price and recalculates: the local copy takes it,
     // the owner's logged cost keeps standing on the dashboard.
     setUserPrice(db, 'remote-logged-model', { input: 5, output: 0 })
-    recalcPricing(db, { currentDeviceInstanceId: OWN })
+    await recalcPricing(db, { currentDeviceInstanceId: OWN })
     expect(mirroredRow().cost).toBeCloseTo(5)
     expect(mirrorRow()).toMatchObject({ cost: 10, cost_source: 'log' })
 
@@ -318,18 +318,18 @@ describe('Recalc Command — pulled rows', () => {
     // must not fall to $0 as well — the owner's unversioned row would never
     // restore it.
     removeUserPrice(db, 'remote-logged-model')
-    recalcPricing(db, { currentDeviceInstanceId: OWN })
+    await recalcPricing(db, { currentDeviceInstanceId: OWN })
     expect(mirroredRow()).toMatchObject({ cost: 0, cost_source: 'unknown' })
     expect(mirrorRow()).toMatchObject({ cost: 10, cost_source: 'log' })
   })
 
-  it('leaves the mirror to the owner when the merged copy is newer than it', () => {
+  it('leaves the mirror to the owner when the merged copy is newer than it', async () => {
     insertSyncedRecord(db, synced())
     mergeSyncedRecordsIntoRecords(db, OWN)
     // The row was refreshed by a later pull the merge has not applied yet.
     db.prepare('UPDATE records SET cache_read_tokens = 900000 WHERE id = ?').run('remote-1')
 
-    const result = recalcPricing(db, { currentDeviceInstanceId: OWN })
+    const result = await recalcPricing(db, { currentDeviceInstanceId: OWN })
 
     expect(result.updatedCount).toBe(1)
     expect(result.syncedUpdatedCount).toBe(0)
