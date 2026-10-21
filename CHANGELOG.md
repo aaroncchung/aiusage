@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`aiusage summary` and `aiusage export` ignored their date options** ([#144](https://github.com/juliantanx/aiusage/pull/144) by [@aaroncchung](https://github.com/aaroncchung)) — `summary --week`, `--month`, `--from` and `--to`, and `export --range`, `--from` and `--to`, were accepted and then ignored, so both commands always covered all time; the menu's "This week" and "This month" summaries showed all-time totals as well. The options now select the same local calendar days as the dashboard's date ranges: `--from` and `--to` include both days and can be given alone, `--week`, `--month` and `--range day|week|month` start where the dashboard's presets start, and the week starts on the day set in the dashboard. An invalid date, `--from` after `--to`, or options that contradict each other now end the command with a message. An export keeps its row order, and without date options both commands print exactly what they did before.
+
 ---
 
 ## [1.5.23] - 2026-10-20

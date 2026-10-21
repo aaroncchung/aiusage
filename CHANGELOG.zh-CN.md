@@ -7,6 +7,9 @@
 
 ## [未发布]
 
+### 修复
+- **`aiusage summary` 和 `aiusage export` 忽略日期选项**（[#144](https://github.com/juliantanx/aiusage/pull/144)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — `summary` 的 `--week`、`--month`、`--from`、`--to`，以及 `export` 的 `--range`、`--from`、`--to` 虽然可以传入，但一直被忽略，两个命令总是统计全部时间；菜单中的“本周”“本月”摘要显示的也是全部时间的总计。现在这些选项按与看板日期范围相同的本地日历日筛选：`--from` 和 `--to` 都包含当天，并且可以单独使用；`--week`、`--month` 和 `--range day|week|month` 的起点与看板对应的预设范围相同，一周的第一天沿用看板中的设置。日期无效、`--from` 晚于 `--to`，或选项相互冲突时，命令会给出提示并退出。导出的行顺序保持不变；不带日期选项时，两个命令的输出与之前完全相同。
+
 ---
 
 ## [1.5.23] - 2026-10-20
