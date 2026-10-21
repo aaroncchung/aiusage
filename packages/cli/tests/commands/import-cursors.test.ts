@@ -1263,4 +1263,94 @@ describe('runParse and records stored before the installation had a device id', 
       log.mockRestore()
     }
   })
+
+  it('leaves a copy alone while its row is read only in part, and folds it once the row is read in full', async () => {
+    writeFileSync(join(aiusageDir, 'config.json'), JSON.stringify({ device: 'laptop' }))
+    const cursorDb = sourceDb('state.vscdb', CURSOR_SCHEMA)
+    const putKv = (key: string, value: string) => cursorDb.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run(key, value)
+    const bubble = JSON.stringify({ type: 2, tokenCount: { inputTokens: 40, outputTokens: 4 } })
+    putKv('composerData:conv', JSON.stringify({ _v: 3, composerId: 'conv', createdAt: 1_779_400_000_000, usageData: {}, fullConversationHeadersOnly: [], conversationMap: {}, status: 'none' }))
+    putKv('bubbleId:conv:b1', JSON.stringify({ type: 2, tokenCount: { inputTokens: 400, outputTokens: 40 } }))
+    putKv('bubbleId:conv:b2', bubble)
+    const opencode = sourceDb('opencode.db', MESSAGE_SCHEMA)
+    const putPart = (id: string, timeCreated: number, data: string) =>
+      opencode.prepare('INSERT OR REPLACE INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)').run(id, 'oc_1', 'sess', timeCreated, data)
+    const write = JSON.stringify({ type: 'tool', tool: 'write' })
+    putMessage(opencode, 'oc_1', 1000, assistant(100, 10, null))
+    putPart('part_1', 1001, JSON.stringify({ type: 'tool', tool: 'read' }))
+    const hermes = sourceDb('state.db', HERMES_SCHEMA)
+    const putHermes = (input: number) =>
+      hermes.prepare('INSERT OR REPLACE INTO sessions (id, model, started_at, ended_at, input_tokens, output_tokens) VALUES (?, ?, ?, ?, ?, ?)').run('h1', 'gpt-4o', 100, null, input, 30)
+    const putPayload = (id: number, toolCalls: string) =>
+      hermes.prepare('INSERT OR REPLACE INTO messages (id, session_id, role, tool_calls, timestamp) VALUES (?, ?, ?, ?, ?)').run(id, 'h1', 'assistant', toolCalls, 150 + id)
+    const grep = JSON.stringify([{ function: { name: 'grep' } }])
+    putHermes(300)
+    putPayload(1, JSON.stringify([{ function: { name: 'read' } }]))
+    const options = { openCodeDbPath: join(dir, 'opencode.db'), hermesDbPath: join(dir, 'state.db'), cursorDbPath: join(dir, 'state.vscdb') }
+    const records = () => cache.prepare('SELECT id, tool, input_tokens FROM records ORDER BY tool, id').all() as Array<{ id: string; tool: string; input_tokens: number }>
+    const callsOf = (id: string) => cache.prepare('SELECT name FROM tool_calls WHERE record_id = ? ORDER BY call_index').pluck().all(id)
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    try {
+      // No state.json yet: everything is stored under the 'unknown' sentinel.
+      await runParse(cache, undefined, options)
+      const originals = records()
+      expect(originals.map(r => [r.tool, r.input_tokens])).toEqual([['cursor', 440], ['hermes', 300], ['opencode', 100]])
+      const [cursorId, hermesId, openCodeId] = originals.map(r => r.id)
+
+      // As in the test above, a release that builds ids from the device id
+      // alone reads every row again: the Cursor conversation while a bubble
+      // could not be read, so its copy holds a short total, and the OpenCode
+      // message and Hermes session after each gained a call.
+      writeFileSync(join(aiusageDir, 'state.json'), JSON.stringify({ deviceInstanceId: DEVICE }))
+      expect(backfillUnknownDeviceInstanceId(cache, DEVICE, 'laptop')).toBe(3)
+      putKv('bubbleId:conv:b2', '{not json')
+      putMessage(opencode, 'oc_1', 1000, assistant(110, 10, null))
+      putPart('part_2', 1002, write)
+      putHermes(330)
+      putPayload(2, grep)
+      const copyOf = { device: 'laptop', deviceInstanceId: DEVICE, now: NOW, cursor: null }
+      const cursorCopy = runParseCursor(cursorDb, { ...copyOf, dbPath: options.cursorDbPath })
+      const copies = [
+        { records: [...cursorCopy.records, ...cursorCopy.partialRecords], toolCalls: cursorCopy.toolCalls },
+        runParseOpenCode(opencode, { ...copyOf, dbPath: options.openCodeDbPath }),
+        runParseHermes(hermes, { ...copyOf, dbPath: options.hermesDbPath }),
+      ]
+      for (const result of copies) {
+        for (const record of result.records) insertRecord(cache, record)
+        for (const tc of result.toolCalls) insertToolCall(cache, tc)
+      }
+      const stored = records()
+      expect(stored.map(r => [r.tool, r.input_tokens])).toEqual(expect.arrayContaining([['cursor', 400], ['hermes', 330], ['opencode', 110]]))
+      expect(stored).toHaveLength(6)
+      const copyIds = stored.map(r => r.id).filter(id => !originals.some(o => o.id === id))
+      const copyCalls = copyIds.map(callsOf)
+      expect(copyCalls).toEqual(expect.arrayContaining([['read', 'write'], ['read', 'grep']]))
+
+      // The bubble still cannot be read, and now neither can the OpenCode
+      // part or the Hermes payload: no row is read in full, so each copy is
+      // left as it is, and so are the stored Cursor total and the stored
+      // calls. The OpenCode and Hermes usage is read in full and written.
+      putPart('part_2', 1002, '{not json')
+      putPayload(2, '{not json')
+      await runParse(cache, undefined, options)
+      const usage: Record<string, number> = { [hermesId]: 330, [openCodeId]: 110 }
+      expect(records()).toEqual(stored.map(r => ({ ...r, input_tokens: usage[r.id] ?? r.input_tokens })))
+      expect(copyIds.map(callsOf)).toEqual(copyCalls)
+      expect([cursorId, hermesId, openCodeId].map(callsOf)).toEqual([[], ['read'], ['read']])
+
+      // Read in full: each copy is folded into its original, which holds
+      // what the row holds now.
+      putKv('bubbleId:conv:b2', bubble)
+      putPart('part_2', 1002, write)
+      putPayload(2, grep)
+      await runParse(cache, undefined, options)
+      expect(records().map(r => [r.id, r.tool, r.input_tokens])).toEqual([[cursorId, 'cursor', 440], [hermesId, 'hermes', 330], [openCodeId, 'opencode', 110]])
+      expect([cursorId, hermesId, openCodeId].map(callsOf)).toEqual([[], ['read', 'grep'], ['read', 'write']])
+      expect(cache.prepare('SELECT COUNT(*) FROM tool_calls').pluck().get()).toBe(4)
+      expect(counts(await runParse(cache, undefined, options))).toEqual([0, 0])
+    } finally {
+      log.mockRestore()
+    }
+  })
 })

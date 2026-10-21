@@ -453,6 +453,15 @@ export interface RereadRecordIds {
   /** Builds a record's id; pass it to the importers as their `recordId`. */
   recordId: RecordIdBuilder
   /**
+   * The id `recordId` returns, without folding a copy into it. For an
+   * importer whose read of a row can be incomplete: a fold gives the
+   * original the copy's measurements (and, outside Claude Code, the copy's
+   * calls go with the copy), which only a complete read of the row puts
+   * right, so such an importer folds the copy (by calling `recordId`) once
+   * it has read the row in full.
+   */
+  storedId: RecordIdBuilder
+  /**
    * For an id `recordId` returned from the `'unknown'` sentinel, the id the
    * same record has under the device's own id: the id of the copy that a
    * release without this lookup stored. `foldRecordCopy` keeps a Claude Code
@@ -482,7 +491,8 @@ export interface RereadRecordIds {
  */
 export function recordIdsForReread(db: Database.Database, deviceInstanceId: string): RereadRecordIds {
   if (!deviceInstanceId || deviceInstanceId === UNKNOWN_DEVICE_INSTANCE_ID) {
-    return { recordId: (seed, offset) => generateRecordId(deviceInstanceId, seed, offset), copyOf: () => undefined }
+    const own: RecordIdBuilder = (seed, offset) => generateRecordId(deviceInstanceId, seed, offset)
+    return { recordId: own, storedId: own, copyOf: () => undefined }
   }
   const stored = db.prepare(`
     SELECT source_file, line_offset FROM records
@@ -515,6 +525,12 @@ export function recordIdsForReread(db: Database.Database, deviceInstanceId: stri
       }
       resolved.set(key, result)
       return result
+    },
+    storedId: (seed, offset) => {
+      const known = resolved.get(`${seed}\0${offset}`)
+      if (known !== undefined) return known
+      const sentinelId = generateRecordId(UNKNOWN_DEVICE_INSTANCE_ID, seed, offset)
+      return stored.get(sentinelId, deviceInstanceId) ? sentinelId : generateRecordId(deviceInstanceId, seed, offset)
     },
     copyOf: (id) => copies.get(id),
   }

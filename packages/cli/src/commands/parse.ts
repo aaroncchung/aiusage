@@ -4,7 +4,7 @@ import { basename, join, dirname } from 'node:path'
 import { hostname } from 'node:os'
 import { Aggregator, resolveExchangeRate, generateToolCallId, claudeCodeToolCall, inferProvider, calculateCost, resolvePrice, recordIdFor, normalizeCodeFuseModel, parseTimestamp, type RecordIdBuilder, type StatsRecord, type Tool } from '@aiusage/core'
 import type { ToolCallRecord } from '@aiusage/core'
-import { insertChangedRecords, insertRecord, LOCAL_RECORDS_WHERE, backfillUnknownDeviceInstanceId, recordIdsForReread } from '../db/records.js'
+import { insertChangedRecords, insertRecord, LOCAL_RECORDS_WHERE, backfillUnknownDeviceInstanceId, recordIdsForReread, type RereadRecordIds } from '../db/records.js'
 import { insertToolCall, deleteAdoptedToolCall, deletePositionalCounterpart, hasPositionalToolCallId } from '../db/tool-calls.js'
 import { getState } from '../init.js'
 import { loadConfig, AIUSAGE_DIR } from '../config.js'
@@ -291,6 +291,41 @@ function storedSessionTime(db: Database.Database, tool: Tool, deviceInstanceId: 
     ORDER BY ts, id LIMIT 1
   `).pluck()
   return (sessionId) => stored.get(tool, deviceInstanceId, sourceFile, sessionId) as number | undefined
+}
+
+/**
+ * Record ids for an importer whose read of a row can be incomplete: a Cursor
+ * conversation with a bubble, an OpenCode message with a part, or a Hermes
+ * session with a `tool_calls` payload that cannot be read. Such a read leaves
+ * what is stored as it is (a total that may be short is not stored over a
+ * record, and stored tool calls are kept), but folding a copy stored under
+ * the device id (see `recordIdsForReread`) would not: the original would take
+ * the copy's measurements, and the copy's calls would go with it. `recordId`
+ * returns the parse's id without folding, and `foldCopies` folds the copies of
+ * the records read in full, before they are written. The copy of a record
+ * read in part stays until the record is read in full.
+ */
+function foldOnCompleteRead(recordIds: RereadRecordIds): { recordId: RecordIdBuilder; foldCopies(ids: Iterable<string>): void } {
+  const keys = new Map<string, [string, number]>()
+  return {
+    recordId: (seed, offset) => {
+      const id = recordIds.storedId(seed, offset)
+      keys.set(id, [seed, offset])
+      return id
+    },
+    foldCopies: (ids) => {
+      for (const id of ids) {
+        const key = keys.get(id)
+        if (key) recordIds.recordId(key[0], key[1])
+      }
+    },
+  }
+}
+
+/** The ids of `records` that are not in `incomplete`. */
+function completeRecordIds(records: StatsRecord[], incomplete: string[]): string[] {
+  const skip = new Set(incomplete)
+  return records.map(record => record.id).filter(id => !skip.has(id))
 }
 
 type RecordIds = { deviceInstanceId: string; recordId?: RecordIdBuilder }
@@ -1063,17 +1098,19 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
     try {
       const openCodeDb = new Database(openCodeDbPath, { readonly: true })
       try {
+        const ids = foldOnCompleteRead(recordIds)
         const result = runParseOpenCode(openCodeDb, {
           dbPath: openCodeDbPath,
           device,
           deviceInstanceId,
-          recordId,
+          recordId: ids.recordId,
           platform: devicePlatform,
           now: Date.now(),
           cursor: wm.getOpenCodeCursor(),
           exchangeRate,
         })
 
+        ids.foldCopies(completeRecordIds(result.records, result.incompleteToolCallRecordIds))
         const stored = insertRecordsWithToolCalls(db, result.records, result.toolCalls, result.incompleteToolCallRecordIds)
         if (result.nextCursor) {
           wm.setOpenCodeCursor(result.nextCursor)
@@ -1097,17 +1134,19 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
     try {
       const hermesDb = new Database(hermesDbPath, { readonly: true })
       try {
+        const ids = foldOnCompleteRead(recordIds)
         const result = runParseHermes(hermesDb, {
           dbPath: hermesDbPath,
           device,
           deviceInstanceId,
-          recordId,
+          recordId: ids.recordId,
           platform: devicePlatform,
           now: Date.now(),
           cursor: wm.getHermesCursor(),
           exchangeRate,
         })
 
+        ids.foldCopies(completeRecordIds(result.records, result.incompleteToolCallRecordIds))
         const stored = insertRecordsWithToolCalls(db, result.records, result.toolCalls, result.incompleteToolCallRecordIds)
         if (result.nextCursor) {
           wm.setHermesCursor(result.nextCursor)
@@ -1167,11 +1206,12 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
       const cursorDb = new Database(cursorDbPath, { readonly: true })
       try {
         let cursorProgressFired = false
+        const ids = foldOnCompleteRead(recordIds)
         const result = runParseCursor(cursorDb, {
           dbPath: cursorDbPath,
           device,
           deviceInstanceId,
-          recordId,
+          recordId: ids.recordId,
           platform: devicePlatform,
           now: Date.now(),
           cursor: wm.getCursorCursor(),
@@ -1181,7 +1221,9 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           },
         })
 
-        // A total that may be short never replaces a stored one.
+        // A total that may be short never replaces a stored one: neither
+        // itself, nor through the copy of its record (see foldOnCompleteRead).
+        ids.foldCopies(result.records.map(record => record.id))
         const hasRecord = db.prepare('SELECT 1 FROM records WHERE id = ?')
         const partialRecords = result.partialRecords.filter((record) => !hasRecord.get(record.id))
         // Every conversation is read on every run: only the records that are
