@@ -7,6 +7,9 @@
 
 ## [未发布]
 
+### 修复
+- **Windows 上无法恢复损坏的数据库，恢复后的数据库也找不回历史数据**（[#147](https://github.com/juliantanx/aiusage/pull/147)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 缓存以 `SQLITE_CORRUPT` 或 `SQLITE_NOTADB` 打开失败时，文件会在仍被打开的状态下被删除，这在 Windows 上会失败；该错误被忽略，此后每条命令都会失败，直到用户手动删除文件。在所有平台上，`watermark.json` 中解析器的读取位置都会保留下来，因此新数据库会跳过所有已读过的日志。现在损坏的数据库会先被关闭，再连同其 `-wal`、`-shm` 和 `-journal` 文件一起改名为 `cache.db.corrupt-<时间>` 移到一旁，而不是被删除，因为其中可能有日志已不存在的用量数据。`watermark.json` 会被重置，下一次解析会重新导入所有日志。如果数据库无法移走（例如仍被另一个 aiusage 进程打开），会报告错误，所有文件保持原样。
+
 ---
 
 ## [1.5.24] - 2026-10-21

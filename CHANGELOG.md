@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A corrupted database could not be recovered on Windows, and a recovered one never got its history back** ([#147](https://github.com/juliantanx/aiusage/pull/147) by [@aaroncchung](https://github.com/aaroncchung)) — when the cache failed to open with `SQLITE_CORRUPT` or `SQLITE_NOTADB`, it was deleted while still open, which fails on Windows; the failure was ignored, so every command failed until the file was deleted by hand. On every platform the parsers' cursors in `watermark.json` survived, so the new database skipped every log already read. The corrupted database is now closed and moved aside with its `-wal`, `-shm` and `-journal` files as `cache.db.corrupt-<time>` instead of being deleted, since it can hold usage whose logs are gone. `watermark.json` is reset, so the next parse imports every log again. A database that cannot be moved (another aiusage process still has it open) is reported, and every file is left in place.
+
 ---
 
 ## [1.5.24] - 2026-10-21
