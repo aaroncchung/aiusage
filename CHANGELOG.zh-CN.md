@@ -7,6 +7,11 @@
 
 ## [未发布]
 
+### 修复
+- **Kiro 的 token 日志每次变化都会被重复计入**（[#145](https://github.com/juliantanx/aiusage/pull/145)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 每次变化都会重新读取整个 `tokens_generated.jsonl`，并以新的 id 再次保存之前的每一行，时间戳也取自文件的修改时间。现在每一行只保存一次，id 由文件、行的位置和行内容生成；行内记录了时间时使用该时间；被替换的日志会从头重新读取。已保存的重复记录会在升级后清理一次，并从同步目标中撤回。
+- **Cursor 的 agent transcript 每次增长都会新增一条估算**（[#145](https://github.com/juliantanx/aiusage/pull/145)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 每次解析增长后的 agent transcript 都会在已有估算之外再新增一条，`state.vscdb` 已经统计过的对话也会被再估算一次。现在每个 transcript 只有一条估算，随文件增长而替换；对话一旦有来自 `state.vscdb` 的真实 token 数就不再估算。已保存的重复记录会在升级后清理一次，并从同步目标中撤回。
+- **CodeBuddy IDE 对话每新增一轮就会被重复计入**（[#145](https://github.com/juliantanx/aiusage/pull/145)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 每一轮都会再保存一条对话累计记录，之前的轮次因此被重复统计。现在每个对话只有一条记录，由最新的快照替换。已保存的多余记录会在升级后清理一次，保留的记录会作为最新版本发布到同步目标。
+
 ---
 
 ## [1.5.24] - 2026-10-21

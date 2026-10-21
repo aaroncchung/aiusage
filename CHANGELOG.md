@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Kiro usage was counted again every time its token log changed** ([#145](https://github.com/juliantanx/aiusage/pull/145) by [@aaroncchung](https://github.com/aaroncchung)) — every change read the whole `tokens_generated.jsonl` again and stored each earlier line once more under a new id, with the file's modification time as its timestamp. Each line is now stored once, under an id built from the file, its position and its content, and takes its own time when the line records one; a log that was replaced is read again from the start. Duplicates already stored are removed once after upgrading and retracted from the sync targets.
+- **Cursor transcript estimates were added again every time a transcript grew** ([#145](https://github.com/juliantanx/aiusage/pull/145) by [@aaroncchung](https://github.com/aaroncchung)) — each parse of a grown agent transcript added another estimate beside the earlier ones, and a conversation that `state.vscdb` already counted was estimated as well. A transcript now has one estimate, replaced as it grows, and none once the conversation has real token counts from `state.vscdb`. Duplicates already stored are removed once after upgrading and retracted from the sync targets.
+- **CodeBuddy IDE conversations were counted again with every new turn** ([#145](https://github.com/juliantanx/aiusage/pull/145) by [@aaroncchung](https://github.com/aaroncchung)) — each turn stored another conversation-cumulative record, so the earlier turns were counted again. A conversation now has one record, replaced by its latest snapshot. Extra records already stored are removed once after upgrading, and the record that is kept is published to the sync targets as the newest version.
+
 ---
 
 ## [1.5.24] - 2026-10-21
