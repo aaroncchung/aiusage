@@ -42,17 +42,6 @@ const CURRENT_CODEFUSE_PARSER_VERSION = 3
  */
 const CURRENT_CLAUDE_CODE_PARSER_VERSION = 2
 
-/**
- * v1: Kiro token logs, Cursor agent transcripts and CodeBuddy IDE
- * conversations were stored again under a new id each time their source
- * changed (issues #79, #80, #81). Unlike the versions above, this one is not
- * applied in `load()`: the repair deletes rows, so `runParse` runs it with the
- * database at hand (`repairImporterDuplicates`) and records the version after.
- * It is also absent from `defaultState()`, so a database whose
- * `watermark.json` was lost is still repaired.
- */
-export const CURRENT_IMPORTER_DEDUP_VERSION = 1
-
 export interface WatermarkEntry {
   offset: number
   size: number
@@ -161,6 +150,17 @@ function defaultFileData(): FileWatermarkData {
     'trae': {},
   }
 }
+
+/**
+ * v1: Kiro token logs, Cursor agent transcripts and CodeBuddy IDE
+ * conversations were stored again under a new id each time their source
+ * changed (issues #79, #80, #81). Unlike the versions above, this one is not
+ * applied in `load()`: the repair deletes rows, so `runParse` runs it with the
+ * database at hand (`repairImporterDuplicates`) and records the version after.
+ * It is also absent from `defaultState()`, so a database whose
+ * `watermark.json` was lost is still repaired.
+ */
+export const CURRENT_IMPORTER_DEDUP_VERSION = 1
 
 export class WatermarkManager {
   private data: WatermarkState
