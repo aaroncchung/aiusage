@@ -593,7 +593,10 @@ function publishedWireId(row: Record<string, unknown>, deviceInstanceId: string)
 
 /**
  * True when a local row is published under `wireId`. Only a row with that id
- * or one at the same place in the same source can be.
+ * or one at the same place in the same source can be. Each is looked up by
+ * its own index (the id, the source file): with `origin` in the same query
+ * the planner can pick the origin index and read every local row, once per
+ * folded copy.
  */
 function isWireIdPublished(
   db: Database.Database,
@@ -601,11 +604,11 @@ function isWireIdPublished(
   deviceInstanceId: string,
   near: Pick<StatsRecord, 'sourceFile' | 'lineOffset'>,
 ): boolean {
-  const rows = db.prepare(`
-    SELECT * FROM records
-    WHERE ${LOCAL_RECORDS_WHERE} AND (id = ? OR (source_file = ? AND line_offset = ?))
-  `).all(wireId, near.sourceFile, near.lineOffset) as Record<string, unknown>[]
-  return rows.some(row => publishedWireId(row, deviceInstanceId) === wireId)
+  const rows = [
+    ...db.prepare('SELECT * FROM records WHERE id = ?').all(wireId),
+    ...db.prepare('SELECT * FROM records WHERE source_file = ? AND line_offset = ?').all(near.sourceFile, near.lineOffset),
+  ] as Record<string, unknown>[]
+  return rows.some(row => row.origin === 'local' && publishedWireId(row, deviceInstanceId) === wireId)
 }
 
 /**
