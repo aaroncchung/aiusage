@@ -1,7 +1,24 @@
 import type Database from 'better-sqlite3'
 
-export function exportData(db: Database.Database, format: 'csv' | 'json' | 'ndjson'): string {
-  const records = db.prepare('SELECT * FROM records').all() as any[]
+export interface ExportOptions {
+  /** Inclusive lower bound on `ts`, in ms since epoch. */
+  startTs?: number
+  /** Exclusive upper bound on `ts`, in ms since epoch. */
+  endTs?: number
+}
+
+export function exportData(db: Database.Database, format: 'csv' | 'json' | 'ndjson', options?: ExportOptions): string {
+  const timeWhere = [
+    typeof options?.startTs === 'number' ? 'ts >= @startTs' : '',
+    typeof options?.endTs === 'number' ? 'ts < @endTs' : '',
+  ].filter(Boolean).join(' AND ')
+  const timeParam = {
+    ...(typeof options?.startTs === 'number' ? { startTs: options.startTs } : {}),
+    ...(typeof options?.endTs === 'number' ? { endTs: options.endTs } : {}),
+  }
+  // Table order, as an export without bounds has always had: with a `ts` bound
+  // SQLite reads through the `ts DESC` index and would return newest first.
+  const records = db.prepare(`SELECT * FROM records${timeWhere ? ` WHERE ${timeWhere}` : ''} ORDER BY rowid`).all(timeParam) as any[]
 
   if (format === 'csv') {
     const headers = 'timestamp,tool,model,provider,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,thinking_tokens,cost,cost_source,session_id,device,device_instance_id'

@@ -9,6 +9,7 @@ import { runSync, runSyncRepair, formatRepairReport, formatForgetTargetReport, s
 import { generateSummary } from './commands/summary.js'
 import { generateStatus } from './commands/status.js'
 import { exportData } from './commands/export.js'
+import { DateOptionError, resolveDateBounds, type DateBounds, type DateOptions } from './commands/date-options.js'
 import { cleanOldData, cleanAll, getRemoteBackends, cleanReachesBackend, propagateClean } from './commands/clean.js'
 import { recalcPricing } from './commands/recalc.js'
 import { runParse } from './commands/parse.js'
@@ -22,12 +23,28 @@ import { runLeaderboardView } from './commands/leaderboard-view.js'
 import { runMenu } from './commands/menu.js'
 import { createDatabase } from './db/index.js'
 import { ensureAiusageDir, getState } from './init.js'
-import { AIUSAGE_DIR } from './config.js'
+import { AIUSAGE_DIR, loadConfig } from './config.js'
 import { JsonFileError } from './json-file.js'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const DB_PATH = join(AIUSAGE_DIR, 'cache.db')
+
+/**
+ * The `ts` bounds for the date options of `summary` and `export`. A date the
+ * command cannot use ends it with a message, like the other option checks here.
+ * `--week` starts on the dashboard's configured first day of the week.
+ */
+function dateBoundsOrExit(options: DateOptions): DateBounds {
+  try {
+    const weekStart = options.range === 'week' ? (loadConfig()?.weekStart ?? 1) as 0 | 1 : 1
+    return resolveDateBounds(options, weekStart)
+  } catch (error) {
+    if (!(error instanceof DateOptionError)) throw error
+    console.error(error.message)
+    process.exit(1)
+  }
+}
 
 const program = new Command()
 
@@ -94,12 +111,23 @@ program
   .option('--device <id>', 'Filter by device instance ID')
   .option('--tool <tool>', 'Filter by any supported tool id')
   .action((options) => {
+    if (options.week && options.month) {
+      console.error('Cannot use --week and --month together. Use one or the other.')
+      process.exit(1)
+    }
+    const range = options.week ? 'week' : options.month ? 'month' : undefined
+    if (range && (options.from !== undefined || options.to !== undefined)) {
+      console.error(`Cannot use --${range} with --from or --to.`)
+      process.exit(1)
+    }
+    const bounds = dateBoundsOrExit({ range, from: options.from, to: options.to })
     const db = createDatabase(DB_PATH)
     const state = getState(AIUSAGE_DIR)
     const summary = generateSummary(db, {
       currentDeviceInstanceId: state?.deviceInstanceId,
       device: options.device,
       tool: options.tool,
+      ...bounds,
     })
     if (summary.deviceLabel) {
       console.log(`设备：${summary.deviceLabel}`)
@@ -154,8 +182,18 @@ program
       console.error('Invalid format. Use csv, json, or ndjson.')
       process.exit(1)
     }
+    const range = options.range as DateOptions['range']
+    if (range !== undefined && !['day', 'week', 'month'].includes(range)) {
+      console.error('Invalid range. Use day, week, or month.')
+      process.exit(1)
+    }
+    if (range !== undefined && (options.from !== undefined || options.to !== undefined)) {
+      console.error('Cannot use --range with --from or --to.')
+      process.exit(1)
+    }
+    const bounds = dateBoundsOrExit({ range, from: options.from, to: options.to })
     const db = createDatabase(DB_PATH)
-    const data = exportData(db, format)
+    const data = exportData(db, format, bounds)
     if (options.output) {
       writeFileSync(options.output, data, 'utf-8')
       console.log(`Exported to ${options.output}`)
