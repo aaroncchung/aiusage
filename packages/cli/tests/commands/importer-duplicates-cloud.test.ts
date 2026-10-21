@@ -6,7 +6,7 @@ import { writeFileSync } from 'node:fs'
 import { generateRecordId, generateSyncRecordId } from '@aiusage/core'
 import type { StatsRecord, SyncRecord, Tool } from '@aiusage/core'
 import { initializeDatabase } from '../../src/db/index.js'
-import { getUnsyncedRecords, insertRecord, markRecordsSynced, recordIdsForReread } from '../../src/db/records.js'
+import { foldRecordCopy, getUnsyncedRecords, insertRecord, markRecordsSynced, recordIdsForReread } from '../../src/db/records.js'
 import { DELETED_LOCAL_ROWS } from '../../src/db/sync-claims.js'
 import {
   collapseImporterDuplicates,
@@ -502,6 +502,37 @@ describe('importer duplicates and sync targets', () => {
 
     expect(await cloudSync()).toMatchObject({ uploadedCount: 0, retiredCount: 0 })
     expect(onServer().map(r => r.id)).toEqual([first.id])
+  })
+
+  it('does not retract a wire id that a parse queues and publishes while an earlier tombstone request is pending', async () => {
+    // A Claude Code message stored twice: under the sentinel's id at an earlier
+    // line, and as a copy under the device's id at the message's last line.
+    // Both were uploaded under the wire ids of their lines.
+    const log = '/home/me/.claude/projects/p/s.jsonl'
+    const original = record('claude-code', generateRecordId('unknown', 'msg-1', 0), log, T0, { lineOffset: 100 })
+    const copy = record('claude-code', generateRecordId(DEVICE, 'msg-1', 0), log, T0, { lineOffset: 200 })
+    for (const row of [original, copy]) insertRecord(db, row)
+    await cloudSync()
+    const lastLine = generateSyncRecordId(DEVICE, log, 200)
+    expect(onServer().map(r => r.id).sort()).toEqual([generateSyncRecordId(DEVICE, log, 100), lastLine].sort())
+
+    // While the tombstone of an unrelated id is pending, a parse in another
+    // process folds the copy (queuing its wire id, which no row publishes at
+    // that moment) and then writes the original at the message's last line.
+    db.prepare(`INSERT INTO sync_retired_wire_ids (target, wire_id) VALUES ('cloud', 'gone')`).run()
+    whileRetracting = () => {
+      expect(foldRecordCopy(db, copy.id, original.id)).toBe(true)
+      expect(retired()).toEqual([{ target: 'cloud', wire_id: 'gone' }, { target: 'cloud', wire_id: lastLine }].sort((a, b) => a.wire_id.localeCompare(b.wire_id)))
+      insertRecord(db, { ...original, lineOffset: 200, updatedAt: Date.now() })
+    }
+    await cloudSync()
+    expect(tombstonesSent).toEqual(['gone'])
+    expect(retired()).toEqual([])
+
+    // The next sync uploads the original under that wire id, and it stays.
+    await cloudSync()
+    expect(tombstonesSent).toEqual(['gone'])
+    expect(onServer().map(r => r.id)).toContain(lastLine)
   })
 
   it('does not retract a queued wire id that a local Cursor or CodeBuddy row is published under', async () => {

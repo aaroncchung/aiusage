@@ -357,27 +357,32 @@ export class CloudSyncOrchestrator {
    * server reports as rejected is kept and sent again with the next sync. An
    * id the cloud cannot hold (empty, or with a NUL, which PostgreSQL text
    * cannot store) has no cloud record to retract: it is forgotten without
-   * being sent. The queue is read again for every batch: a parse can store a
-   * record under a queued id while a request is pending, which takes the id
-   * off the queue. An id a local row is published under again was just
-   * pushed for that row, so it is forgotten instead of retracted
-   * (`unretirePublishedWireIds`).
+   * being sent.
+   *
+   * The queue is read again for every batch, and before each batch every id
+   * a local row is published under is forgotten instead of retracted
+   * (`unretirePublishedWireIds`): `push` has just uploaded that row, or a
+   * parse queued the id or wrote the row while an earlier request was
+   * pending.
    */
   private async pushRetiredIds(syncGeneration: number): Promise<{ retiredCount: number; unretiredCount: number }> {
-    unretirePublishedWireIds(this.db, this.target, this.options.deviceInstanceId)
     let retiredCount = 0
     let unretiredCount = 0
     const storable = (id: string): boolean => id !== '' && !id.includes('\u0000')
     // Each id is sent at most once per sync, so one the server rejected
     // waits for the next sync instead of being read again here.
     const sent = new Set<string>()
-    for (;;) {
+    const pending = (): string[] => {
       const queued = Array.from(new Set([...getRetiredWireIds(this.db, this.target), ...getRetiredWireIds(this.db, DELETED_LOCAL_ROWS)]))
       const unstorable = queued.filter(id => !storable(id))
       clearRetiredWireIds(this.db, this.target, unstorable)
       clearRetiredWireIds(this.db, DELETED_LOCAL_ROWS, unstorable)
-      const batch = queued.filter(id => storable(id) && !sent.has(id)).slice(0, BATCH_SIZE)
-      if (batch.length === 0) return { retiredCount, unretiredCount }
+      return queued.filter(id => storable(id) && !sent.has(id))
+    }
+    for (let ids = pending(); ids.length > 0; ids = pending()) {
+      if (unretirePublishedWireIds(this.db, this.target, this.options.deviceInstanceId) > 0) ids = pending()
+      const batch = ids.slice(0, BATCH_SIZE)
+      if (batch.length === 0) break
       for (const id of batch) sent.add(id)
       const now = Date.now()
       const result = await cloudPush([], batch.map(record_id => ({ record_id, updatedAt: now })), this.options.deviceInstanceId, syncGeneration)
@@ -388,5 +393,6 @@ export class CloudSyncOrchestrator {
       retiredCount += applied.length
       unretiredCount += batch.length - applied.length
     }
+    return { retiredCount, unretiredCount }
   }
 }
