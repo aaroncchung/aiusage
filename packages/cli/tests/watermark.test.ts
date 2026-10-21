@@ -197,7 +197,7 @@ describe('WatermarkManager', () => {
 
     wm.save()
     const saved = JSON.parse(readFileSync(watermarkPath, 'utf-8'))
-    expect(saved.antigravityParserVersion).toBe(1)
+    expect(saved.antigravityParserVersion).toBe(2)
     expect(saved.grokParserVersion).toBe(1)
     expect(saved.codebuddyParserVersion).toBe(1)
   })
@@ -219,7 +219,7 @@ describe('WatermarkManager', () => {
 
     wm.save()
     const saved = JSON.parse(readFileSync(watermarkPath, 'utf-8'))
-    expect(saved.codefuseParserVersion).toBe(2)
+    expect(saved.codefuseParserVersion).toBe(3)
   })
 
   it('preserves CodeFuse entries written by the current parser version', () => {
@@ -227,7 +227,7 @@ describe('WatermarkManager', () => {
       files: {
         codefuse: { '/cf/projects/current.jsonl': { offset: 7, size: 7, mtime: 7 } },
       },
-      codefuseParserVersion: 2,
+      codefuseParserVersion: 3,
     }), 'utf-8')
 
     const wm = new WatermarkManager(watermarkPath)
@@ -239,7 +239,7 @@ describe('WatermarkManager', () => {
       files: {
         antigravity: { '/ag/conversations/current.db': { offset: 7, size: 8192, mtime: 7 } },
       },
-      antigravityParserVersion: 1,
+      antigravityParserVersion: 2,
     }), 'utf-8')
 
     const wm = new WatermarkManager(watermarkPath)

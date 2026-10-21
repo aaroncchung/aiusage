@@ -37,7 +37,7 @@ import { base64url, sha256Buffer } from '../leaderboard/crypto.js'
 import { recordLeaderboardUpload, uploadLeaderboardData } from '../commands/leaderboard-upload.js'
 import { isKelivoSourceFile, runParseKelivo } from '../commands/parse-kelivo.js'
 import { recalcPricing } from '../commands/recalc.js'
-import { insertChangedRecords, LOCAL_RECORDS_WHERE } from '../db/records.js'
+import { insertChangedRecords, LOCAL_RECORDS_WHERE, recordIdsForReread } from '../db/records.js'
 import { AsyncTaskQueue, type AsyncTaskQueueStatus } from '../db/write-queue.js'
 import { getPricingRegistrySummary, getUserAliasBindings, listLocalModelBindings, listPricingAliasTargets, listPricingModels, loadPricingRuntime, removeUserPricingAlias, resetUserPriceToSynced, setUserPrice, setUserPricingAlias, syncPricingFromLitellm } from '../pricing-registry.js'
 import type { DetectedTool } from '../discovery.js'
@@ -2146,14 +2146,19 @@ export function createApiServer(db: Database.Database, options?: ApiServerOption
 
           const cfg = loadConfig()
           const now = Date.now()
-          const result = await runParseKelivo({
+          const deviceInstanceId = options?.currentDeviceInstanceId ?? 'unknown'
+          // A message imported before this installation had a device id keeps
+          // the record it was stored under (see recordIdsForReread), which can
+          // fold a copy into it, so the backup is read in the write queue.
+          const result = await runDbWrite(() => runParseKelivo({
             filePath: tempPath,
             device: getDeviceName(),
-            deviceInstanceId: options?.currentDeviceInstanceId ?? 'unknown',
+            deviceInstanceId,
+            recordId: recordIdsForReread(db, deviceInstanceId).recordId,
             platform: cfg?.platform ?? platform(),
             now,
             exchangeRate: resolveExchangeRate(cfg ?? {}),
-          })
+          }))
           if (result.errors.length > 0 && result.records.length === 0) {
             json(res, { error: { code: 'IMPORT_FAILED', message: result.errors[0] }, errors: result.errors }, 400)
             return

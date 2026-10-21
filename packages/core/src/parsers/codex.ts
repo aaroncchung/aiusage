@@ -1,6 +1,6 @@
 import type { Parser, ParseResult, ParseContext } from '../types.js'
 import type { StatsRecord, ToolCallRecord, Tool } from '../types.js'
-import { generateRecordId, generateToolCallId, generateOrphanToolCallId } from '../record-id.js'
+import { recordIdFor, generateToolCallId, generateOrphanToolCallId } from '../record-id.js'
 import { inferProvider } from '../provider.js'
 import { calculateCost } from '../pricing.js'
 
@@ -87,7 +87,7 @@ export class CodexParser implements Parser {
     const costSource = model === 'unknown' ? 'unknown' as const : 'pricing' as const
     const provider = inferProvider(model)
 
-    const recordId = generateRecordId(context.deviceInstanceId, context.sourceFile, context.lineOffset)
+    const recordId = recordIdFor(context, context.sourceFile, context.lineOffset)
 
     const record: StatsRecord = {
       id: recordId,

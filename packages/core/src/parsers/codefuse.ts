@@ -1,6 +1,6 @@
 import type { Parser, ParseResult, ParseContext } from '../types.js'
 import type { StatsRecord, ToolCallRecord } from '../types.js'
-import { generateRecordId, generateToolCallId, generateOrphanToolCallId } from '../record-id.js'
+import { recordIdFor, generateToolCallId, generateOrphanToolCallId } from '../record-id.js'
 import { inferProvider } from '../provider.js'
 import { calculateCost, resolvePrice } from '../pricing.js'
 import { normalizeCodeFuseModel } from '../codefuse-model.js'
@@ -237,8 +237,8 @@ export class CodeFuseParser implements Parser {
     const cost = hasPrice ? calculateCost(model, usage, context.exchangeRate) : 0
     const recordTs = parseTimestamp(options.rawTs, context.now)
     const recordId = options.idSeed
-      ? generateRecordId(context.deviceInstanceId, options.idSeed, 0)
-      : generateRecordId(context.deviceInstanceId, context.sourceFile, context.lineOffset)
+      ? recordIdFor(context, options.idSeed, 0)
+      : recordIdFor(context, context.sourceFile, context.lineOffset)
 
     const record: StatsRecord = {
       id: recordId,

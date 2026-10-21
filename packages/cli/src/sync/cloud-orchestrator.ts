@@ -7,6 +7,7 @@ import {
   isUploadableLocalRecord,
   markRecordVersionsSynced,
   repairRecordProvenance,
+  unretirePublishedWireIds,
 } from '../db/records.js'
 import {
   deleteSyncedRecord,
@@ -348,8 +349,11 @@ export class CloudSyncOrchestrator {
    * and one the server reports as rejected is kept and sent again. An id the
    * cloud cannot hold (empty, or with a NUL, which PostgreSQL text cannot
    * store) has no cloud record to retract: it is forgotten without being sent.
+   * An id a local row is published under again was just pushed for that row,
+   * so it is forgotten instead of retracted (`unretirePublishedWireIds`).
    */
   private async pushRetiredIds(syncGeneration: number): Promise<{ retiredCount: number; unretiredCount: number }> {
+    unretirePublishedWireIds(this.db, this.target, this.options.deviceInstanceId)
     const retired = getRetiredWireIds(this.db, this.target)
     let retiredCount = 0
     let unretiredCount = 0

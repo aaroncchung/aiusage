@@ -1,12 +1,14 @@
 import type Database from 'better-sqlite3'
 import type { StatsRecord, ToolCallRecord } from '@aiusage/core'
-import { generateRecordId, generateToolCallId, inferProvider, calculateCost } from '@aiusage/core'
+import { generateToolCallId, inferProvider, calculateCost, recordIdFor, type RecordIdBuilder } from '@aiusage/core'
 import type { OpenCodeCursor } from '../watermark.js'
 
 export interface OpenCodeImportOptions {
   dbPath: string
   device: string
   deviceInstanceId: string
+  /** Builds record ids (see recordIdFor); runParse passes recordIdsForReread. */
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   cursor: OpenCodeCursor | null
@@ -115,7 +117,7 @@ export function runParseOpenCode(
     const provider = parsed.providerID ?? inferProvider(model)
     const ts = parsed.time?.created ?? message.time_created
 
-    const recordId = generateRecordId(deviceInstanceId, dbPath + ':' + message.id, message.time_created)
+    const recordId = recordIdFor(options, dbPath + ':' + message.id, message.time_created)
 
     const tokenArgs = { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, thinkingTokens: reasoningTokens }
     const calculatedCost = model !== 'unknown' ? calculateCost(model, tokenArgs, exchangeRate) : 0

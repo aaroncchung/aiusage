@@ -1,6 +1,6 @@
 import type { Parser, ParseResult, ParseContext } from '../types.js'
 import type { StatsRecord, ToolCallRecord, Tool } from '../types.js'
-import { generateRecordId, generateToolCallId, generateOrphanToolCallId } from '../record-id.js'
+import { recordIdFor, generateToolCallId, generateOrphanToolCallId } from '../record-id.js'
 import { inferProvider } from '../provider.js'
 import { calculateCost } from '../pricing.js'
 
@@ -87,7 +87,7 @@ export class OpenClawParser implements Parser {
     const provider = parsed.message.provider ?? inferProvider(model)
 
     const record: StatsRecord = {
-      id: generateRecordId(context.deviceInstanceId, context.sourceFile, context.lineOffset),
+      id: recordIdFor(context, context.sourceFile, context.lineOffset),
       ts,
       ingestedAt: context.now,
       updatedAt: context.now,

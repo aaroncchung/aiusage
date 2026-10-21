@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 import type { StatsRecord, ToolCallRecord } from '@aiusage/core'
-import { calculateCost, generateRecordId, generateOrphanToolCallId, inferProvider } from '@aiusage/core'
+import { calculateCost, generateOrphanToolCallId, inferProvider, recordIdFor, type RecordIdBuilder } from '@aiusage/core'
 import type { ZcodeCursor, ZcodeToolCursor } from '../watermark.js'
 
 export type { ZcodeCursor, ZcodeToolCursor }
@@ -9,6 +9,8 @@ export interface ZcodeImportOptions {
   dbPath: string
   device: string
   deviceInstanceId: string
+  /** Builds record ids (see recordIdFor); runParse passes recordIdsForReread. */
+  recordId?: RecordIdBuilder
   platform?: string
   now: number
   cursor: ZcodeCursor | null
@@ -109,7 +111,7 @@ export function runParseZcode(db: Database.Database, options: ZcodeImportOptions
     const model = normalizeZcodeModel(row.model_id)
     const provider = inferProvider(model)
     const ts = Number(row.started_at) || now
-    const recordId = generateRecordId(deviceInstanceId, `${dbPath}:${row.id}`, ts)
+    const recordId = recordIdFor(options, `${dbPath}:${row.id}`, ts)
 
     const tokenArgs = { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, thinkingTokens }
     const calculatedCost = model !== 'unknown' ? calculateCost(model, tokenArgs, exchangeRate) : 0

@@ -9,6 +9,7 @@
 
 ### 修复
 - **`aiusage recalc` 为每条记录重新读取整张价格表**（[#143](https://github.com/juliantanx/aiusage/pull/143)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 对于既没有用户价格、也没有精确别名的模型，该命令会为每条记录重新加载全部有效价格（LiteLLM 同步后约 3,000 行），因此当数据库中有几千条这样的记录时，一次重算需要 10 到 30 秒。现在 `aiusage recalc` 与看板的“立即重算”执行同一个重算函数：每次运行中每个模型只定价一次，价格表最多读取一次；在一个有 45,000 条记录的数据库上，该命令约半秒即可完成。该命令现在也会把没有模型的 Qoder 记录按 `qoder-auto` 定价，与“立即重算”和 Qoder 导入器此前的做法一致。结果的其他方面不变：日志费用、用户价格、对 `synced_records` 的重新定价，以及从其他设备拉取的行的 `updated_at`，处理方式都与之前相同。
+- **v1.5.23 在获得设备 ID 之前就解析过日志的安装上重复统计用量**（[#142](https://github.com/juliantanx/aiusage/pull/142)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 记录 ID 包含设备 ID。v1.5.22 之前，未设置同步的安装以设备 ID `unknown` 解析日志；v1.5.22 为每个安装生成了真实的设备 ID，但保留了旧的记录 ID。v1.5.23 一次性重新导入 Claude Code 和 CodeFuse 日志时，又以新 ID 把此前解析过的每条消息存了第二份。再次导入的 Kelivo 备份、Kelivo 自身的数据库、不断增长的 Roo Code、Kilo Code 和 Kiro 会话文件、更新过的 Zed 对话以及丢失的 watermark 也会这样。用量和费用因此翻倍，副本会在下一次同步时上传。现在每个导入器都会找到某一条数据已有的记录。每个副本会并入原记录：原记录保留其 ID 和同步状态，并采用副本较新的读取结果及其 Claude Code 工具调用。已上传到同步目标的副本会从目标中撤回。升级后会再读取一次 Claude Code、CodeFuse 和 Antigravity 日志以找出副本。对于按行记录的日志，以及此后转录文件已被删除的 Claude Code 消息，迁移会在不读取日志的情况下移除其副本。其他来源已无法读取的副本会保留，直到再次导入该来源；Kelivo 用户请再导入一次最新的备份。
 
 ---
 

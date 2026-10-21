@@ -1,5 +1,5 @@
 import type { Parser, ParseResult, ParseContext, StatsRecord, Tool } from '../types.js'
-import { generateRecordId } from '../record-id.js'
+import { recordIdFor } from '../record-id.js'
 import { inferProvider } from '../provider.js'
 import { calculateCost } from '../pricing.js'
 
@@ -90,7 +90,7 @@ export class CopilotParser implements Parser {
       inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, thinkingTokens,
     }, context.exchangeRate)
 
-    const recordId = generateRecordId(context.deviceInstanceId, context.sourceFile, context.lineOffset)
+    const recordId = recordIdFor(context, context.sourceFile, context.lineOffset)
 
     const statsRecord: StatsRecord = {
       id: recordId, ts, ingestedAt: context.now, updatedAt: context.now,
