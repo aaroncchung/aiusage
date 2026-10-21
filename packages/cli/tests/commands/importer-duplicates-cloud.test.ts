@@ -30,6 +30,21 @@ let loseResponse = false
 let failRetraction = false
 /** Ids whose tombstone the server reports as not applied, once each. */
 const refuseTombstones = new Set<string>()
+/** Runs once when the cloud sync next checks for live wire ids, as a parse in another process could just before. */
+let beforeLiveCheck: (() => void) | null = null
+
+vi.mock('../../src/db/records.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/db/records.js')>()
+  return {
+    ...actual,
+    unretirePublishedWireIds: (...args: Parameters<typeof actual.unretirePublishedWireIds>) => {
+      const run = beforeLiveCheck
+      beforeLiveCheck = null
+      run?.()
+      return actual.unretirePublishedWireIds(...args)
+    },
+  }
+})
 
 vi.mock('../../src/sync/cloud.js', () => ({
   CloudSyncError: class CloudSyncError extends Error {},
@@ -111,6 +126,7 @@ describe('importer duplicates and sync targets', () => {
     loseResponse = false
     failRetraction = false
     refuseTombstones.clear()
+    beforeLiveCheck = null
     vi.clearAllMocks()
   })
 
@@ -533,6 +549,26 @@ describe('importer duplicates and sync targets', () => {
     await cloudSync()
     expect(tombstonesSent).toEqual(['gone'])
     expect(onServer().map(r => r.id)).toContain(lastLine)
+  })
+
+  it('does not retract a wire id that a parse stores again after the sync read the queue', async () => {
+    const request = (line: string) => record('kiro', kiroLogLineId({ deviceInstanceId: DEVICE }, KIRO_LOG, 0, line), KIRO_LOG, T0, { updatedAt: Date.now() })
+    const first = request('line-a')
+    replaceKiroLogLines(db, KIRO_LOG, [first])
+    await cloudSync()
+    // A replaced log yields the same request under another id, which retires the first.
+    const second = request('line-b')
+    replaceKiroLogLines(db, KIRO_LOG, [second])
+    expect(retired()).toEqual([{ target: 'cloud', wire_id: first.id }])
+
+    // The next sync has read the queue when a parse in another process reads
+    // the first log again: the first id is live and off the queue, the second retired.
+    beforeLiveCheck = () => replaceKiroLogLines(db, KIRO_LOG, [{ ...first, updatedAt: Date.now() }])
+    await cloudSync()
+    expect(tombstonesSent).toEqual([second.id])
+
+    await cloudSync()
+    expect(onServer().map(r => r.id)).toEqual([first.id])
   })
 
   it('does not retract a queued wire id that a local Cursor or CodeBuddy row is published under', async () => {

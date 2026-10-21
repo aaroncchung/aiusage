@@ -359,11 +359,11 @@ export class CloudSyncOrchestrator {
    * cannot store) has no cloud record to retract: it is forgotten without
    * being sent.
    *
-   * The queue is read again for every batch, and before each batch every id
-   * a local row is published under is forgotten instead of retracted
-   * (`unretirePublishedWireIds`): `push` has just uploaded that row, or a
-   * parse queued the id or wrote the row while an earlier request was
-   * pending.
+   * Every batch is read from the queue as it is then, in the same transaction
+   * that first forgets, instead of retracting, every id a local row is
+   * published under (`unretirePublishedWireIds`): `push` has just uploaded
+   * that row, or a parse queued the id, wrote the row or stored it again
+   * while an earlier request was pending.
    */
   private async pushRetiredIds(syncGeneration: number): Promise<{ retiredCount: number; unretiredCount: number }> {
     let retiredCount = 0
@@ -372,17 +372,22 @@ export class CloudSyncOrchestrator {
     // Each id is sent at most once per sync, so one the server rejected
     // waits for the next sync instead of being read again here.
     const sent = new Set<string>()
-    const pending = (): string[] => {
+    const unsent = (): string[] => {
       const queued = Array.from(new Set([...getRetiredWireIds(this.db, this.target), ...getRetiredWireIds(this.db, DELETED_LOCAL_ROWS)]))
       const unstorable = queued.filter(id => !storable(id))
       clearRetiredWireIds(this.db, this.target, unstorable)
       clearRetiredWireIds(this.db, DELETED_LOCAL_ROWS, unstorable)
       return queued.filter(id => storable(id) && !sent.has(id))
     }
-    for (let ids = pending(); ids.length > 0; ids = pending()) {
-      if (unretirePublishedWireIds(this.db, this.target, this.options.deviceInstanceId) > 0) ids = pending()
-      const batch = ids.slice(0, BATCH_SIZE)
-      if (batch.length === 0) break
+    // The live ids are checked and the batch is read in one transaction, so
+    // no parse can queue, publish or store an id in between. The local rows
+    // are read only when something is left to send.
+    const nextBatch = this.db.transaction((): string[] => {
+      if (unsent().length === 0) return []
+      unretirePublishedWireIds(this.db, this.target, this.options.deviceInstanceId)
+      return unsent().slice(0, BATCH_SIZE)
+    })
+    for (let batch = nextBatch.immediate(); batch.length > 0; batch = nextBatch.immediate()) {
       for (const id of batch) sent.add(id)
       const now = Date.now()
       const result = await cloudPush([], batch.map(record_id => ({ record_id, updatedAt: now })), this.options.deviceInstanceId, syncGeneration)
