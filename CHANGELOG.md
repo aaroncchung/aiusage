@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`aiusage recalc` read the whole price table again for every record** ([#143](https://github.com/juliantanx/aiusage/pull/143) by [@aaroncchung](https://github.com/aaroncchung)) — for a model with no user price and no exact alias, the command loaded every active price (about 3,000 rows after a LiteLLM sync) once per record, so on a database with a few thousand such records a recalculation took 10 to 30 seconds. `aiusage recalc` and the dashboard's *Recalculate now* now run one recalculation, which prices each model once per run and reads the price table at most once; on a database of 45,000 records the command finishes in about half a second. The command also prices a Qoder record without a model as `qoder-auto`, as *Recalculate now* and the Qoder importers already did. Nothing else about the results changes: logged costs, user prices, the repricing of `synced_records` and the `updated_at` of rows pulled from other devices are handled as before.
+
 ---
 
 ## [1.5.23] - 2026-10-20
