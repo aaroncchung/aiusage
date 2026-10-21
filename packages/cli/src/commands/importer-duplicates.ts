@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
-import { generateRecordId, type StatsRecord, type Tool } from '@aiusage/core'
+import { recordIdFor, type RecordIdBuilder, type StatsRecord, type Tool } from '@aiusage/core'
 import { getRecordById, getRecordsBySourceFile, insertRecord, LOCAL_RECORDS_WHERE } from '../db/records.js'
 import { NEXT_UPDATED_AT } from '../db/record-version.js'
 import { DELETED_LOCAL_ROWS } from '../db/sync-claims.js'
@@ -195,11 +195,18 @@ export function replaceSourceSnapshot(
  * Id of one line of a Kiro token log: the file, the byte offset and the line
  * itself. The offset makes a line read again replace its own record; the
  * line's content keeps a different request apart that sits at the same
- * offset after the log was replaced by a new one.
+ * offset after the log was replaced by a new one. Built like every record id
+ * (`recordIdFor`), so `runParse`'s `recordIdsForReread` keeps a line on the
+ * row it is stored under.
  */
-export function kiroLogLineId(deviceInstanceId: string, filePath: string, lineOffset: number, line: string): string {
+export function kiroLogLineId(
+  ids: { deviceInstanceId: string; recordId?: RecordIdBuilder },
+  filePath: string,
+  lineOffset: number,
+  line: string,
+): string {
   const lineHash = createHash('sha256').update(line).digest('hex').slice(0, 16)
-  return generateRecordId(deviceInstanceId, `${filePath}:${lineHash}`, lineOffset)
+  return recordIdFor(ids, `${filePath}:${lineHash}`, lineOffset)
 }
 
 /**

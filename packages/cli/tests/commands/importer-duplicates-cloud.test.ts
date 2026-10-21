@@ -237,7 +237,7 @@ describe('importer duplicates and sync targets', () => {
   })
 
   it('does not send a tombstone for an id that is stored again while an earlier batch is pending', async () => {
-    const restored = record('kiro', kiroLogLineId(DEVICE, KIRO_LOG, 0, 'line'), KIRO_LOG, T0, { updatedAt: Date.now() })
+    const restored = record('kiro', kiroLogLineId({ deviceInstanceId: DEVICE }, KIRO_LOG, 0, 'line'), KIRO_LOG, T0, { updatedAt: Date.now() })
     const queue = db.prepare(`INSERT INTO sync_retired_wire_ids (target, wire_id) VALUES ('cloud', ?)`)
     // More than one batch of ids that sort before the record's.
     for (let i = 0; i < 500; i++) queue.run(`!${String(i).padStart(3, '0')}`)
@@ -360,7 +360,7 @@ describe('importer duplicates and sync targets', () => {
   })
 
   it('leaves a Kiro line, a Cursor estimate and a CodeBuddy snapshot synced when they are read again unchanged', async () => {
-    const line = record('kiro', kiroLogLineId(DEVICE, KIRO_LOG, 0, 'line'), KIRO_LOG, T0)
+    const line = record('kiro', kiroLogLineId({ deviceInstanceId: DEVICE }, KIRO_LOG, 0, 'line'), KIRO_LOG, T0)
     const estimate = record('cursor', generateRecordId(DEVICE, TRANSCRIPT, 0), TRANSCRIPT, T0)
     const snapshot = record('codebuddy', generateRecordId(DEVICE, CONVERSATION, 0), CONVERSATION, T0)
     replaceKiroLogLines(db, KIRO_LOG, [line])
@@ -415,7 +415,7 @@ describe('importer duplicates and sync targets', () => {
   })
 
   it('takes a wire id off the retraction queue when a record is stored under it again', async () => {
-    const line = (text: string) => record('kiro', kiroLogLineId(DEVICE, KIRO_LOG, 0, text), KIRO_LOG, T0, { updatedAt: Date.now() })
+    const line = (text: string) => record('kiro', kiroLogLineId({ deviceInstanceId: DEVICE }, KIRO_LOG, 0, text), KIRO_LOG, T0, { updatedAt: Date.now() })
     const original = line('first log')
     replaceKiroLogLines(db, KIRO_LOG, [original])
     await cloudSync()

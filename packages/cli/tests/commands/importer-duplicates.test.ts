@@ -153,10 +153,10 @@ describe('importer duplicates', () => {
       seedKiroGenerations(path)
       // Lines read after the upgrade: one record each, each with its own time.
       for (const [i, ts] of [T0 - 5_000, T0 + 500_000, T0 + 900_000].entries()) {
-        insertRecord(db, record('kiro', kiroLogLineId(DEVICE, path, 400 + i * 80, 'line'), path, ts, { lineOffset: 400 + i * 80 }))
+        insertRecord(db, record('kiro', kiroLogLineId({ deviceInstanceId: DEVICE }, path, 400 + i * 80, 'line'), path, ts, { lineOffset: 400 + i * 80 }))
       }
       // A line parsed before `init` and relabelled to the device afterwards.
-      insertRecord(db, record('kiro', kiroLogLineId('unknown', path, 800, 'line'), path, T0 - 9_000, { lineOffset: 800 }))
+      insertRecord(db, record('kiro', kiroLogLineId({ deviceInstanceId: 'unknown' }, path, 800, 'line'), path, T0 - 9_000, { lineOffset: 800 }))
 
       expect(collapseImporterDuplicates(db).kiro).toBe(5)
       expect(count()).toBe(4 + 3 + 1)
@@ -333,7 +333,7 @@ describe('importer duplicates', () => {
 
       const result = await runParse(db, 'kiro')
       expect(result.errors).toEqual([])
-      expect(ids()).toEqual([0, 1, 2, 3].map(i => kiroLogLineId(DEVICE, log, i * length, line.trimEnd())).sort())
+      expect(ids()).toEqual([0, 1, 2, 3].map(i => kiroLogLineId({ deviceInstanceId: DEVICE }, log, i * length, line.trimEnd())).sort())
       expect(sum('input_tokens')).toBe(400)
 
       // Nothing left to do on the next parse.
@@ -356,11 +356,11 @@ describe('importer duplicates', () => {
 
       await runParse(db, 'kiro')
       // Offset 0 was read again; the lines at the other offsets keep their newest old row.
-      expect(ids()).toEqual([kiroLogLineId(DEVICE, log, 0, line.trimEnd()), ...rows.slice(6).map(r => r.id)].sort())
+      expect(ids()).toEqual([kiroLogLineId({ deviceInstanceId: DEVICE }, log, 0, line.trimEnd()), ...rows.slice(6).map(r => r.id)].sort())
       expect(sum('input_tokens')).toBe(400)
     })
 
-    it('does not store a Kiro line twice when it was first read before the device had an id', async () => {
+    it('keeps a Kiro line on its row when it was first read before the device had an id', async () => {
       const root = join(scratch, 'kiro')
       mkdirSync(root, { recursive: true })
       const log = join(root, 'tokens_generated.jsonl')
@@ -370,13 +370,15 @@ describe('importer duplicates', () => {
       writeFileSync(join(aiusageDir, 'config.json'), JSON.stringify({ sources: { kiro: root } }))
       // Read before `init` (ids built from 'unknown'), relabelled since; watermark.json was lost.
       for (const i of [0, 1]) {
-        insertRecord(db, record('kiro', kiroLogLineId('unknown', log, i * length, line.trimEnd()), log, T0, {
+        insertRecord(db, record('kiro', kiroLogLineId({ deviceInstanceId: 'unknown' }, log, i * length, line.trimEnd()), log, T0, {
           lineOffset: i * length, model: 'claude-sonnet-4', provider: 'kiro',
         }))
       }
 
       await runParse(db, 'kiro')
-      expect(ids()).toEqual([0, 1].map(i => kiroLogLineId(DEVICE, log, i * length, line.trimEnd())).sort())
+      // Each line is written to the row it is stored under (recordIdsForReread): no second row, nothing to retract.
+      expect(ids()).toEqual([0, 1].map(i => kiroLogLineId({ deviceInstanceId: 'unknown' }, log, i * length, line.trimEnd())).sort())
+      expect(db.prepare('SELECT COUNT(*) AS n FROM sync_retired_wire_ids').get()).toEqual({ n: 0 })
     })
 
     it('keeps a newer CodeBuddy IDE snapshot when only an older message can be read', async () => {

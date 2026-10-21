@@ -708,7 +708,7 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
               const cost = calculateCost(model, tokenArgs, exchangeRate)
               const record: StatsRecord = {
                 // No time in the id: reading a line again replaces its record.
-                id: kiroLogLineId(deviceInstanceId, filePath, thisOffset, line),
+                id: kiroLogLineId({ deviceInstanceId, recordId }, filePath, thisOffset, line),
                 ts: recordTs,
                 ingestedAt: Date.now(),
                 updatedAt: Date.now(),

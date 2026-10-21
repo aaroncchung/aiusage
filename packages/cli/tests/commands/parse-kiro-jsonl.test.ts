@@ -106,7 +106,7 @@ describe('runParse with a Kiro token log (tokens_generated.jsonl)', () => {
 
     const lineLength = Buffer.byteLength(first, 'utf-8')
     expect(rows().map(r => ({ id: r.id, line_offset: r.line_offset }))).toEqual([0, 1, 2].map(i => ({
-      id: kiroLogLineId(DEVICE, logPath, i * lineLength, first.trimEnd()),
+      id: kiroLogLineId({ deviceInstanceId: DEVICE }, logPath, i * lineLength, first.trimEnd()),
       line_offset: i * lineLength,
     })))
   })
