@@ -1,3 +1,4 @@
+import type postgres from 'postgres'
 import { sql } from '../db/pool.js'
 import { decryptDeviceSecret, sha256, buildCanonicalString, hashIp, computeHmac } from '../crypto/hmac.js'
 import { invalidateLeaderboardCache } from '../leaderboard/query.js'
@@ -218,7 +219,7 @@ function getBreakdownShapeError(raw: Record<string, unknown>): string | null {
   }
 }
 
-function validateBreakdownShape(raw: Record<string, unknown>): raw is UploadBreakdown {
+function validateBreakdownShape(raw: Record<string, unknown>): raw is Record<string, unknown> & UploadBreakdown {
   return getBreakdownShapeError(raw) === null
 }
 
@@ -492,7 +493,7 @@ async function loadRiskSettings() {
 }
 
 async function assessRisk(
-  tx: ReturnType<typeof sql>,
+  tx: postgres.TransactionSql,
   userId: string,
   deviceId: string,
   snapshot: UploadSnapshot,

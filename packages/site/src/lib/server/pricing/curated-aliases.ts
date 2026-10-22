@@ -1,7 +1,8 @@
 import { CURATED_PRICE_ALIASES } from '@aiusage/core'
-import type { sql } from '../db/pool.js'
+import type postgres from 'postgres'
 
-type SqlClient = typeof sql
+// The client or a transaction.
+type SqlClient = postgres.Sql | postgres.TransactionSql
 
 /**
  * Seeds the curated aliases from `CURATED_PRICE_ALIASES` (e.g. gemini-3.1-pro →

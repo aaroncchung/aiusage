@@ -1,3 +1,4 @@
+import type postgres from 'postgres'
 import { sql } from '../db/pool.js'
 import { nanoid } from 'nanoid'
 import { invalidateLeaderboardCache } from '../leaderboard/query.js'
@@ -24,12 +25,12 @@ export interface SnapshotModerationResult {
 }
 
 type SnapshotReviewStatus = 'approved' | 'rejected' | 'hidden'
-type Sql = typeof sql
+type Sql = postgres.TransactionSql
 
-// pool.ts types `sql` as the query function alone; `begin` is forwarded to the
-// postgres.js client at run time.
+// postgres.js types `begin` as resolving to `UnwrapPromiseArray<T>` because a
+// callback may return an array of queries; `fn` returns a promise, so it is `T`.
 function transaction<T>(fn: (tx: Sql) => Promise<T>): Promise<T> {
-  return (sql as unknown as { begin(fn: (tx: Sql) => Promise<T>): Promise<T> }).begin(fn)
+  return sql.begin(fn) as Promise<T>
 }
 
 // Marks the snapshot reviewed and applies `apply` to the leaderboard in one

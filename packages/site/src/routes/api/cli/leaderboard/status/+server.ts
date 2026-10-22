@@ -14,8 +14,8 @@ export const GET: RequestHandler = async ({ request }) => {
       SELECT u.id, u.username, u.display_name, u.avatar_url, d.name as device_name
       FROM users u
       JOIN user_devices d ON d.user_id = u.id
-      WHERE u.id = ${verification.userId}
-        AND d.id = ${verification.deviceId}
+      WHERE u.id = ${verification.userId!}
+        AND d.id = ${verification.deviceId!}
       LIMIT 1
     `
     const snapshots = await sql`
@@ -24,7 +24,7 @@ export const GET: RequestHandler = async ({ request }) => {
         d.name as device_name
       FROM upload_snapshots s
       JOIN user_devices d ON d.id = s.device_id
-      WHERE s.user_id = ${verification.userId}
+      WHERE s.user_id = ${verification.userId!}
       ORDER BY s.created_at DESC
       LIMIT 100
     `

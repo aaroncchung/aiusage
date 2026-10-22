@@ -1,5 +1,6 @@
 import { json } from '@sveltejs/kit'
 import type { RequestHandler } from './$types'
+import type postgres from 'postgres'
 import { sql } from '$lib/server/db/pool.js'
 import { verifyUploadRequest } from '$lib/server/uploads/verify.js'
 import { getConfigValue, CFG } from '$lib/server/config.js'
@@ -140,7 +141,7 @@ export const POST: RequestHandler = async ({ request }) => {
   }
 
   // Get or create cloud device instance
-  let instance = await sql`
+  let instance: postgres.Row[] = await sql`
     SELECT id, sync_generation FROM cloud_device_instances
     WHERE user_id = ${userId} AND device_instance_id = ${deviceInstanceId}
   `
@@ -279,7 +280,7 @@ export const POST: RequestHandler = async ({ request }) => {
       // Update device instance cursor
       await tx`
         UPDATE cloud_device_instances
-        SET last_push_cursor = ${body.server_cursor || null}, updated_at = NOW()
+        SET last_push_cursor = ${(body.server_cursor as string | undefined) || null}, updated_at = NOW()
         WHERE id = ${instanceRow.id}
       `
 

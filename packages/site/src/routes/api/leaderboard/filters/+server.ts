@@ -15,7 +15,7 @@ export const GET: RequestHandler = async (event) => {
       AND lm.visibility = 'public' AND u.status = 'active' AND u.leaderboard_visibility = 'public'`
 
     const [tools, models] = await Promise.all([
-      sql`
+      sql<{ tool: string }[]>`
         SELECT lm.tool
         FROM leaderboard_metrics lm
         JOIN users u ON u.id = lm.user_id
@@ -27,7 +27,7 @@ export const GET: RequestHandler = async (event) => {
           SUM(${valueColumn}) DESC,
           lm.tool ASC
       `,
-      sql`
+      sql<{ model: string }[]>`
         SELECT lm.model
         FROM leaderboard_metrics lm
         JOIN users u ON u.id = lm.user_id
@@ -41,8 +41,8 @@ export const GET: RequestHandler = async (event) => {
       `,
     ])
     return json({
-      tools: (tools as Array<{ tool: string }>).map(r => r.tool),
-      models: (models as Array<{ model: string }>).map(r => r.model),
+      tools: tools.map(r => r.tool),
+      models: models.map(r => r.model),
     })
   } catch (err) {
     console.error('Leaderboard filters query failed:', err)
