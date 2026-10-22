@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The site passes `tsc --noEmit`** ([#149](https://github.com/juliantanx/aiusage/pull/149) by [@aaroncchung](https://github.com/aaroncchung)) — the type check reported 122 errors in `packages/site`, almost all because the database client was typed as a bare query function: `sql.begin` did not exist for the compiler, and transaction handles were typed as query results. The client and transaction handles now have their postgres.js types, query results take their row types as the query's type argument instead of an assertion, and the last few parameter and predicate errors are fixed. The site now reports no errors. Types only: nothing changes at run time. The CI step that keeps it at zero follows separately.
+
 ---
 
 ## [1.5.25] - 2026-10-22
