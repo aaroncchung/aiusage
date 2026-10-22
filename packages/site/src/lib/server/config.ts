@@ -68,9 +68,9 @@ export async function setConfig(key: string, value: number, description: string,
 }
 
 export async function getAllConfigs(): Promise<Record<string, { value: number; description: string | null }>> {
-  const rows = await sql`SELECT key, value, description FROM site_config ORDER BY key`
+  const rows = await sql<{ key: string; value: number; description: string | null }[]>`SELECT key, value, description FROM site_config ORDER BY key`
   const result: Record<string, { value: number; description: string | null }> = {}
-  for (const row of rows as Array<{ key: string; value: number; description: string | null }>) {
+  for (const row of rows) {
     result[row.key] = { value: row.value, description: row.description }
   }
   return result

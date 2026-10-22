@@ -51,11 +51,12 @@ function getSql(): ReturnType<typeof postgres> {
 
 // sql is callable (for tagged template literals) and has properties (like .begin)
 // Use a function with forwarded properties
-function sql(strings: TemplateStringsArray, ...values: unknown[]) {
+function sql(strings: TemplateStringsArray, ...values: postgres.ParameterOrFragment<never>[]) {
   return getSql()(strings, ...values)
 }
 
-// Forward property access to the underlying client
+// Forward property access to the underlying client. The proxy stands in for
+// the client, so it is typed as one (`sql.begin`, `sql.end`, ...).
 const sqlProxy = new Proxy(sql, {
   get(_target, prop) {
     const db = getSql()
@@ -64,6 +65,6 @@ const sqlProxy = new Proxy(sql, {
   apply(_target, _thisArg, args) {
     return (getSql() as unknown as Function)(...args)
   }
-})
+}) as unknown as postgres.Sql
 
 export { sqlProxy as sql }

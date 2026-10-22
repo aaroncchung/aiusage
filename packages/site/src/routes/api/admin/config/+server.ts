@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types'
 import { requireAdmin } from '$lib/server/auth/session.js'
 import { getAllConfigs, setConfig, getDefaultValue, CONFIG_DESCRIPTIONS, CONFIG_DESCRIPTIONS_ZH, CONFIG_CATEGORIES, CONFIG_UNITS, CONFIG_DISPLAY_MULTIPLIER, CFG } from '$lib/server/config.js'
 
-const ALL_KEYS = Object.values(CFG)
+const ALL_KEYS: readonly string[] = Object.values(CFG)
 
 export const GET: RequestHandler = async (event) => {
   await requireAdmin(event)
