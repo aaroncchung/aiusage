@@ -119,7 +119,8 @@ describe('parse-opencode', () => {
 
     expect(result.records).toHaveLength(0)
     expect(result.toolCalls).toHaveLength(0)
-    expect(result.nextCursor).toBeNull()
+    // Nothing to import, but nothing to come back for either.
+    expect(result.nextCursor).toEqual({ lastMessageCreatedAt: 1778821880545, lastMessageId: 'msg_1' })
   })
 
   it('respects cursor for incremental import', () => {

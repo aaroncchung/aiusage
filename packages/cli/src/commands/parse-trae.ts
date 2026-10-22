@@ -13,6 +13,14 @@ export interface TraeImportOptions {
   platform?: string
   now: number
   lastImportedAt?: number  // Unix ms timestamp of last import
+  /**
+   * The time of the record stored for a session, if there is one. Every
+   * session is read on every run, and its start time can change (it falls
+   * back to the earliest tag when there is no chain-start tag), so a session
+   * keeps the time it was first stored under, and with it its record id and
+   * tool-call ids, which are built from that time.
+   */
+  storedTime?: (sessionId: string) => number | undefined
 }
 
 export interface TraeImportResult {
@@ -123,28 +131,35 @@ export function runParseTrae(options: TraeImportOptions): TraeImportResult {
   try { entries = readdirSync(dataDir, { withFileTypes: true }) }
   catch (e) { return { records, toolCalls, lastImportedAt: latestTs, errors: [String(e)] } }
 
+  // Every session is emitted on every run. Its tags are read either way, a
+  // session keeps gaining turns after it was first imported, and its record
+  // id is stable, so the caller leaves an unchanged one as it is. Skipping by
+  // start time dropped every session that started before one visited earlier
+  // in the same pass, and directories are listed by name, not by start time.
+  const sessions: SessionTag[] = []
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
     const repoPath = join(dataDir, entry.name, 'v2')
     if (!existsSync(join(repoPath, '.git'))) continue
 
     const session = parseSessionTags(repoPath)
-    if (!session) continue
+    if (session) sessions.push(session)
+  }
+  sessions.sort((a, b) => a.startTs - b.startTs || a.sessionId.localeCompare(b.sessionId))
 
-    // Skip already-imported sessions
-    if (session.startTs < latestTs) continue
-
+  for (const session of sessions) {
     if (session.startTs > latestTs) latestTs = session.startTs
 
     // Estimate tokens from chat turns: ~200 input + ~800 output per turn (heuristic)
     const estInputTokens = session.chatTurns * 200
     const estOutputTokens = session.chatTurns * 800
 
-    const recordId = recordIdFor(options, `${dbPath}:${session.sessionId}`, session.startTs)
+    const ts = options.storedTime?.(session.sessionId) ?? session.startTs
+    const recordId = recordIdFor(options, `${dbPath}:${session.sessionId}`, ts)
 
     const record: StatsRecord = {
       id: recordId,
-      ts: session.startTs,
+      ts,
       ingestedAt: now,
       updatedAt: now,
       lineOffset: 0,
@@ -171,10 +186,10 @@ export function runParseTrae(options: TraeImportOptions): TraeImportResult {
     let callIndex = 0
     for (let i = 0; i < session.toolCalls; i++) {
       toolCalls.push({
-        id: generateRecordId(recordId, 'tool_call', session.startTs + callIndex),
+        id: generateRecordId(recordId, 'tool_call', ts + callIndex),
         recordId,
         name: 'trae-tool',
-        ts: session.startTs + callIndex,
+        ts: ts + callIndex,
         callIndex,
       })
       callIndex++
