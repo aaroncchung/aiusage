@@ -7,6 +7,12 @@
 
 ## [未发布]
 
+---
+
+## [1.5.25] - 2026-10-22
+
+本版本补回多个 AI 工具导入器遗漏的用量、防止重复统计，并让 Windows 上的损坏数据库恢复更加安全，包含 [@aaroncchung](https://github.com/aaroncchung) 贡献的 [#145](https://github.com/juliantanx/aiusage/pull/145)、[#146](https://github.com/juliantanx/aiusage/pull/146)、[#147](https://github.com/juliantanx/aiusage/pull/147) 和 [#148](https://github.com/juliantanx/aiusage/pull/148)。
+
 ### 修复
 - **Antigravity 对话最后一次生成之后的用量从未被导入**（[#148](https://github.com/juliantanx/aiusage/pull/148)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 序号大于最后一次生成所关联的最大步骤序号的步骤不属于任何生成窗口，其中记录的用量（例如最终回复之后的辅助模型调用）会被丢弃，除非之后又出现新的生成。现在这些步骤归入最后一个已完成的生成，并在每次导入时重新读取，因此对话首次导入之后才写入的用量也会被导入。记录的 ID 保持不变：之后出现的生成覆盖这些步骤时会原地更新记录，未变化的步骤重新读取后也不会再次上传。生成所关联步骤之后的用量不会让该生成被视为已完成。升级前已导入的对话会在下次解析时补上缺失的用量，无需重新导入。
 - **Windows 上无法恢复损坏的数据库，恢复后的数据库也找不回历史数据**（[#147](https://github.com/juliantanx/aiusage/pull/147)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 缓存以 `SQLITE_CORRUPT` 或 `SQLITE_NOTADB` 打开失败时，文件会在仍被打开的状态下被删除，这在 Windows 上会失败；该错误被忽略，此后每条命令都会失败，直到用户手动删除文件。在所有平台上，`watermark.json` 中解析器的读取位置都会保留下来，因此新数据库会跳过所有已读过的日志。现在损坏的数据库会先被关闭，再连同其 `-wal`、`-shm` 和 `-journal` 文件一起改名为 `cache.db.corrupt-<时间>` 移到一旁，而不是被删除，因为其中可能有日志已不存在的用量数据。`watermark.json` 会被重置，下一次解析会重新导入所有日志。如果数据库无法移走（例如仍被另一个 aiusage 进程打开），会报告错误，所有文件保持原样。
@@ -613,6 +619,7 @@
 
 ---
 
+[1.5.25]: https://github.com/juliantanx/aiusage/compare/v1.5.24...v1.5.25
 [1.5.24]: https://github.com/juliantanx/aiusage/compare/v1.5.23...v1.5.24
 [1.5.23]: https://github.com/juliantanx/aiusage/compare/v1.5.22...v1.5.23
 [1.5.22]: https://github.com/juliantanx/aiusage/compare/v1.5.21...v1.5.22

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [1.5.25] - 2026-10-22
+
+Restore missing usage and prevent duplicate accounting across AI tool importers, while making corrupted database recovery safe on Windows. This release includes [#145](https://github.com/juliantanx/aiusage/pull/145), [#146](https://github.com/juliantanx/aiusage/pull/146), [#147](https://github.com/juliantanx/aiusage/pull/147), and [#148](https://github.com/juliantanx/aiusage/pull/148) by [@aaroncchung](https://github.com/aaroncchung).
+
 ### Fixed
 - **Antigravity usage after a conversation's last generation was never imported** ([#148](https://github.com/juliantanx/aiusage/pull/148) by [@aaroncchung](https://github.com/aaroncchung)) — a step whose index is above the last generation's highest linked step fell in no generation window, so usage stored in it (a helper-model call made after the final response) was dropped unless a later generation came along. Such steps now belong to the last settled generation and are read again on every import, so usage written after a conversation was first imported is picked up too. The records keep their ids, so a later generation that covers those steps updates them in place, and a step read again unchanged is not uploaded again. Usage after a generation's linked steps never marks that generation as finished. Conversations imported before upgrading get the missing usage at the next parse; nothing is re-imported.
 - **A corrupted database could not be recovered on Windows, and a recovered one never got its history back** ([#147](https://github.com/juliantanx/aiusage/pull/147) by [@aaroncchung](https://github.com/aaroncchung)) — when the cache failed to open with `SQLITE_CORRUPT` or `SQLITE_NOTADB`, it was deleted while still open, which fails on Windows; the failure was ignored, so every command failed until the file was deleted by hand. On every platform the parsers' cursors in `watermark.json` survived, so the new database skipped every log already read. The corrupted database is now closed and moved aside with its `-wal`, `-shm` and `-journal` files as `cache.db.corrupt-<time>` instead of being deleted, since it can hold usage whose logs are gone. `watermark.json` is reset, so the next parse imports every log again. A database that cannot be moved (another aiusage process still has it open) is reported, and every file is left in place.
@@ -617,6 +623,7 @@ Fix multi-device sync correctness across GitHub, S3/R2, and Cloud.
 
 ---
 
+[1.5.25]: https://github.com/juliantanx/aiusage/compare/v1.5.24...v1.5.25
 [1.5.24]: https://github.com/juliantanx/aiusage/compare/v1.5.23...v1.5.24
 [1.5.23]: https://github.com/juliantanx/aiusage/compare/v1.5.22...v1.5.23
 [1.5.22]: https://github.com/juliantanx/aiusage/compare/v1.5.21...v1.5.22
