@@ -4,7 +4,7 @@ import { basename, join, dirname } from 'node:path'
 import { hostname } from 'node:os'
 import { Aggregator, resolveExchangeRate, generateToolCallId, claudeCodeToolCall, inferProvider, calculateCost, resolvePrice, recordIdFor, normalizeCodeFuseModel, parseTimestamp, type RecordIdBuilder, type StatsRecord, type Tool } from '@aiusage/core'
 import type { ToolCallRecord } from '@aiusage/core'
-import { insertChangedRecords, insertRecord, LOCAL_RECORDS_WHERE, backfillUnknownDeviceInstanceId, recordIdsForReread } from '../db/records.js'
+import { insertChangedRecords, insertRecord, LOCAL_RECORDS_WHERE, backfillUnknownDeviceInstanceId, recordIdsForReread, type RereadRecordIds } from '../db/records.js'
 import { insertToolCall, deleteAdoptedToolCall, deletePositionalCounterpart, hasPositionalToolCallId } from '../db/tool-calls.js'
 import { getState } from '../init.js'
 import { loadConfig, AIUSAGE_DIR } from '../config.js'
@@ -215,6 +215,118 @@ function normalizeKiroModel(value: unknown): string {
     .replace(/^(anthropic\.|openai\.|aws\.)/, '')
     .replace(/:\d+$/, '')
     .replace(/-\d{8}-v\d+(?:-\d+)?$/i, '')
+}
+
+/**
+ * Store records of an import that reads rows again, each with the tool calls
+ * read for it now. A tool call's id contains its position among the calls of
+ * its record, so a call that appears in front of stored ones (a part that
+ * could not be read before) would shift them to new ids and leave the old
+ * rows behind. All calls of such a record come from the one row it was built
+ * from, so its stored calls are replaced as a whole.
+ *
+ * That holds only for a complete read. For a record in
+ * `incompleteRecordIds` part of the source could not be read, and the calls
+ * read now may be short of some: the calls stored for it are left as they
+ * are and the ones read now are dropped, since they could neither replace
+ * the stored ones nor be added to them without counting calls twice. When
+ * nothing is stored for the record yet, what could be read is stored. The
+ * importer reads such a record again, and the first complete read replaces
+ * whatever is stored.
+ *
+ * Returns how many records were added or changed and how many tool calls
+ * were stored that were not stored before, so a row read again unchanged is
+ * not counted as parsed again. A record has changed when `insertRecord`
+ * moved its `updated_at`. Unlike `insertChangedRecords`, that also counts
+ * `source_file`, in which Hermes keeps the session title.
+ */
+function insertRecordsWithToolCalls(
+  db: Database.Database,
+  records: StatsRecord[],
+  toolCalls: ToolCallRecord[],
+  incompleteRecordIds: string[],
+): { records: number; toolCalls: number } {
+  const incomplete = new Set(incompleteRecordIds)
+  const storedVersion = db.prepare('SELECT updated_at FROM records WHERE id = ?').pluck()
+  const storedToolCallIds = db.prepare('SELECT id FROM tool_calls WHERE record_id = ?').pluck()
+  const removeToolCalls = db.prepare('DELETE FROM tool_calls WHERE record_id = ?')
+  return db.transaction(() => {
+    let written = 0
+    const kept = new Set<string>()
+    const replaced = new Set<string>()
+    for (const record of records) {
+      const before = storedVersion.get(record.id)
+      insertRecord(db, record)
+      if (before === undefined || storedVersion.get(record.id) !== before) written++
+      const stored = storedToolCallIds.all(record.id) as string[]
+      if (incomplete.has(record.id) && stored.length > 0) {
+        kept.add(record.id)
+        continue
+      }
+      for (const id of stored) replaced.add(id)
+      removeToolCalls.run(record.id)
+    }
+    let added = 0
+    for (const tc of toolCalls) {
+      if (tc.recordId !== null && kept.has(tc.recordId)) continue
+      insertToolCall(db, tc)
+      if (!replaced.has(tc.id)) added++
+    }
+    return { records: written, toolCalls: added }
+  })()
+}
+
+/**
+ * The time of the record stored for a session, for an importer that reads
+ * every session on every run and keeps one record per session (Goose, Trae):
+ * the time its id is built from can change after it was first stored. The
+ * importer builds the id from this time with `recordId` (see
+ * `recordIdsForReread`), so it is the id the record is stored under, also
+ * one built from the `'unknown'` sentinel, whose rows `runParse` relabels
+ * before it reads anything.
+ */
+function storedSessionTime(db: Database.Database, tool: Tool, deviceInstanceId: string, sourceFile: string): (sessionId: string) => number | undefined {
+  const stored = db.prepare(`
+    SELECT ts FROM records
+    WHERE tool = ? AND ${LOCAL_RECORDS_WHERE} AND device_instance_id = ? AND source_file = ? AND session_id = ?
+    ORDER BY ts, id LIMIT 1
+  `).pluck()
+  return (sessionId) => stored.get(tool, deviceInstanceId, sourceFile, sessionId) as number | undefined
+}
+
+/**
+ * Record ids for an importer whose read of a row can be incomplete: a Cursor
+ * conversation with a bubble, an OpenCode message with a part, or a Hermes
+ * session with a `tool_calls` payload that cannot be read. Such a read leaves
+ * what is stored as it is (a total that may be short is not stored over a
+ * record, and stored tool calls are kept), but folding a copy stored under
+ * the device id (see `recordIdsForReread`) would not: the original would take
+ * the copy's measurements, and the copy's calls would go with it. `recordId`
+ * returns the parse's id without folding, and `foldCopies` folds the copies of
+ * the records read in full, before they are written. The copy of a record
+ * read in part stays until the record is read in full.
+ */
+function foldOnCompleteRead(recordIds: RereadRecordIds): { recordId: RecordIdBuilder; foldCopies(ids: Iterable<string>): void } {
+  const keys = new Map<string, [string, number]>()
+  return {
+    recordId: (seed, offset) => {
+      const id = recordIds.storedId(seed, offset)
+      keys.set(id, [seed, offset])
+      return id
+    },
+    foldCopies: (ids) => {
+      for (const id of ids) {
+        const key = keys.get(id)
+        if (key) recordIds.recordId(key[0], key[1])
+      }
+    },
+  }
+}
+
+/** The ids of `records` that are not in `incomplete`. */
+function completeRecordIds(records: StatsRecord[], incomplete: string[]): string[] {
+  const skip = new Set(incomplete)
+  return records.map(record => record.id).filter(id => !skip.has(id))
 }
 
 type RecordIds = { deviceInstanceId: string; recordId?: RecordIdBuilder }
@@ -1020,25 +1132,26 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
     try {
       const openCodeDb = new Database(openCodeDbPath, { readonly: true })
       try {
+        const ids = foldOnCompleteRead(recordIds)
         const result = runParseOpenCode(openCodeDb, {
           dbPath: openCodeDbPath,
           device,
           deviceInstanceId,
-          recordId,
+          recordId: ids.recordId,
           platform: devicePlatform,
           now: Date.now(),
           cursor: wm.getOpenCodeCursor(),
           exchangeRate,
         })
 
-        for (const record of result.records) insertRecord(db, record)
-        for (const tc of result.toolCalls) insertToolCall(db, tc)
+        ids.foldCopies(completeRecordIds(result.records, result.incompleteToolCallRecordIds))
+        const stored = insertRecordsWithToolCalls(db, result.records, result.toolCalls, result.incompleteToolCallRecordIds)
         if (result.nextCursor) {
           wm.setOpenCodeCursor(result.nextCursor)
           wm.save()
         }
-        parsedCount += result.records.length
-        toolCallCount += result.toolCalls.length
+        parsedCount += stored.records
+        toolCallCount += stored.toolCalls
         errors.push(...result.errors)
         onProgress({ phase: 'Parsing SQLite', tool: 'opencode', current: 1, total: 1, records: parsedCount, toolCalls: toolCallCount })
       } finally {
@@ -1055,25 +1168,26 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
     try {
       const hermesDb = new Database(hermesDbPath, { readonly: true })
       try {
+        const ids = foldOnCompleteRead(recordIds)
         const result = runParseHermes(hermesDb, {
           dbPath: hermesDbPath,
           device,
           deviceInstanceId,
-          recordId,
+          recordId: ids.recordId,
           platform: devicePlatform,
           now: Date.now(),
           cursor: wm.getHermesCursor(),
           exchangeRate,
         })
 
-        for (const record of result.records) insertRecord(db, record)
-        for (const tc of result.toolCalls) insertToolCall(db, tc)
+        ids.foldCopies(completeRecordIds(result.records, result.incompleteToolCallRecordIds))
+        const stored = insertRecordsWithToolCalls(db, result.records, result.toolCalls, result.incompleteToolCallRecordIds)
         if (result.nextCursor) {
           wm.setHermesCursor(result.nextCursor)
           wm.save()
         }
-        parsedCount += result.records.length
-        toolCallCount += result.toolCalls.length
+        parsedCount += stored.records
+        toolCallCount += stored.toolCalls
         errors.push(...result.errors)
         onProgress({ phase: 'Parsing SQLite', tool: 'hermes', current: 1, total: 1, records: parsedCount, toolCalls: toolCallCount })
       } finally {
@@ -1126,11 +1240,12 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
       const cursorDb = new Database(cursorDbPath, { readonly: true })
       try {
         let cursorProgressFired = false
+        const ids = foldOnCompleteRead(recordIds)
         const result = runParseCursor(cursorDb, {
           dbPath: cursorDbPath,
           device,
           deviceInstanceId,
-          recordId,
+          recordId: ids.recordId,
           platform: devicePlatform,
           now: Date.now(),
           cursor: wm.getCursorCursor(),
@@ -1140,7 +1255,14 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           },
         })
 
-        for (const record of result.records) insertRecord(db, record)
+        // A total that may be short never replaces a stored one: neither
+        // itself, nor through the copy of its record (see foldOnCompleteRead).
+        ids.foldCopies(result.records.map(record => record.id))
+        const hasRecord = db.prepare('SELECT 1 FROM records WHERE id = ?')
+        const partialRecords = result.partialRecords.filter((record) => !hasRecord.get(record.id))
+        // Every conversation is read on every run: only the records that are
+        // new or changed are written and counted.
+        parsedCount += insertChangedRecords(db, [...result.records, ...partialRecords])
         for (const tc of result.toolCalls) insertToolCall(db, tc)
         // Transcripts are read before this database: an estimate stored for a
         // conversation that now has real token counts is superseded.
@@ -1149,7 +1271,6 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           wm.setCursorCursor(result.nextCursor)
           wm.save()
         }
-        parsedCount += result.records.length
         toolCallCount += result.toolCalls.length
         errors.push(...result.errors)
         if (!cursorProgressFired) {
@@ -1176,16 +1297,17 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           recordId,
           platform: devicePlatform,
           now: Date.now(),
-          cursor: wm.getOpenCodeCursor(),
+          cursor: wm.getKiloCursor(),
           exchangeRate,
         })
 
-        for (const record of result.records) insertRecord(db, record)
+        // Messages kept pending are read again: only new or changed records
+        // are written and counted.
+        parsedCount += insertChangedRecords(db, result.records)
         if (result.nextCursor) {
-          wm.setOpenCodeCursor(result.nextCursor)
+          wm.setKiloCursor(result.nextCursor)
           wm.save()
         }
-        parsedCount += result.records.length
 
         // 输出KiloCode统计信息
         if (result.records.length > 0) {
@@ -1225,13 +1347,19 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
           now: Date.now(),
           cursor: wm.getGooseCursor(),
           exchangeRate,
+          // A session is found again by its session id and keeps the time,
+          // and so the id, it was first stored under: both are built from its
+          // creation time, or from the time of the import when that cannot be
+          // read.
+          storedTime: storedSessionTime(db, 'goose', deviceInstanceId, gooseDbPath),
         })
-        for (const record of result.records) insertRecord(db, record)
+        // Every session is read on every run: only the records that are new
+        // or changed are written and counted.
+        parsedCount += insertChangedRecords(db, result.records)
         if (result.nextCursor) {
           wm.setGooseCursor(result.nextCursor)
           wm.save()
         }
-        parsedCount += result.records.length
         errors.push(...result.errors)
         onProgress({ phase: 'Parsing SQLite', tool: 'goose', current: 1, total: 1, records: parsedCount, toolCalls: toolCallCount })
       } finally {
@@ -1362,11 +1490,21 @@ export async function runParse(db: Database.Database, filterTool?: string, optio
       platform: devicePlatform,
       now: Date.now(),
       lastImportedAt: traeLastImported,
+      // As for Goose: a session keeps the time, and so the id, it was first
+      // stored under.
+      storedTime: storedSessionTime(db, 'trae', deviceInstanceId, traeDbPath),
     })
-    for (const record of result.records) insertRecord(db, record)
-    for (const tc of result.toolCalls) insertToolCall(db, tc)
-    parsedCount += result.records.length
-    toolCallCount += result.toolCalls.length
+    // Every session is emitted on every run: only the records that are new
+    // or changed are written and counted. A Trae tool call's id is built
+    // from everything stored for it, so one that is stored already is left
+    // as it is.
+    parsedCount += insertChangedRecords(db, result.records)
+    const hasToolCall = db.prepare('SELECT 1 FROM tool_calls WHERE id = ?')
+    for (const tc of result.toolCalls) {
+      if (hasToolCall.get(tc.id)) continue
+      insertToolCall(db, tc)
+      toolCallCount++
+    }
     errors.push(...result.errors)
     if (result.lastImportedAt > traeLastImported) {
       wm.setTraeLastImported?.(result.lastImportedAt)
