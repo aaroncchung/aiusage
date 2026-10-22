@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Repository housekeeping** ([#150](https://github.com/juliantanx/aiusage/pull/150) by [@aaroncchung](https://github.com/aaroncchung)) — the pnpm store index committed by accident (`.pnpm-store/`) is no longer tracked and is now ignored. The CLI Docker image prepares `pnpm@9.15.0`, the `packageManager` version it already ran, instead of downloading an unused `pnpm@latest` on every build. The site's `db:seed` script, which ran a `seed.ts` that never existed, is removed.
+
 ---
 
 ## [1.5.25] - 2026-10-22
