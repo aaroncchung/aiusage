@@ -4,6 +4,7 @@ import type { RecordIdBuilder, RecordOrigin, StatsRecord, Tool } from '@aiusage/
 import { generateRecordId, generateSyncRecordId } from '@aiusage/core'
 import { mapStatsRecordToSyncRecord, usesGeneratedWireId } from '../sync/mapper.js'
 import { hasPositionalToolCallId, type ToolCallIdRow } from './tool-calls.js'
+import { DELETED_LOCAL_ROWS } from './sync-claims.js'
 
 /**
  * Sentinel device id used by parsers that ran before `state.json` existed.
@@ -141,10 +142,19 @@ function recordValuesEqual(existing: StatsRecord, incoming: StatsRecord): boolea
     && existing.cost === incoming.cost
     && existing.costSource === incoming.costSource
     && existing.sessionId === incoming.sessionId
-    && (existing.cwd ?? '') === (incoming.cwd ?? '')
+    && keptWhenEmptyEqual(existing.cwd, incoming.cwd)
     && existing.device === incoming.device
     && existing.deviceInstanceId === incoming.deviceInstanceId
-    && (existing.platform ?? '') === (incoming.platform ?? '')
+    && keptWhenEmptyEqual(existing.platform, incoming.platform)
+}
+
+/**
+ * `insertRecord` keeps a stored `cwd` or `platform` when the incoming one is
+ * empty (`KEPT_WHEN_EMPTY_COLUMNS`), so an empty incoming value changes
+ * nothing.
+ */
+function keptWhenEmptyEqual(existing: string | undefined, incoming: string | undefined): boolean {
+  return !incoming || (existing ?? '') === incoming
 }
 
 /**
@@ -444,6 +454,15 @@ export interface RereadRecordIds {
   /** Builds a record's id; pass it to the importers as their `recordId`. */
   recordId: RecordIdBuilder
   /**
+   * The id `recordId` returns, without folding a copy into it. For an
+   * importer whose read of a row can be incomplete: a fold gives the
+   * original the copy's measurements (and, outside Claude Code, the copy's
+   * calls go with the copy), which only a complete read of the row puts
+   * right, so such an importer folds the copy (by calling `recordId`) once
+   * it has read the row in full.
+   */
+  storedId: RecordIdBuilder
+  /**
    * For an id `recordId` returned from the `'unknown'` sentinel, the id the
    * same record has under the device's own id: the id of the copy that a
    * release without this lookup stored. `foldRecordCopy` keeps a Claude Code
@@ -473,7 +492,8 @@ export interface RereadRecordIds {
  */
 export function recordIdsForReread(db: Database.Database, deviceInstanceId: string): RereadRecordIds {
   if (!deviceInstanceId || deviceInstanceId === UNKNOWN_DEVICE_INSTANCE_ID) {
-    return { recordId: (seed, offset) => generateRecordId(deviceInstanceId, seed, offset), copyOf: () => undefined }
+    const own: RecordIdBuilder = (seed, offset) => generateRecordId(deviceInstanceId, seed, offset)
+    return { recordId: own, storedId: own, copyOf: () => undefined }
   }
   const stored = db.prepare(`
     SELECT source_file, line_offset FROM records
@@ -506,6 +526,12 @@ export function recordIdsForReread(db: Database.Database, deviceInstanceId: stri
       }
       resolved.set(key, result)
       return result
+    },
+    storedId: (seed, offset) => {
+      const known = resolved.get(`${seed}\0${offset}`)
+      if (known !== undefined) return known
+      const sentinelId = generateRecordId(UNKNOWN_DEVICE_INSTANCE_ID, seed, offset)
+      return stored.get(sentinelId, deviceInstanceId) ? sentinelId : generateRecordId(deviceInstanceId, seed, offset)
     },
     copyOf: (id) => copies.get(id),
   }
@@ -612,30 +638,40 @@ function isWireIdPublished(
 }
 
 /**
- * Drops from `target`'s retirement queue every wire id that a local row of
- * this device is published under now. The row is pushed under that id, and a
- * tombstone sent after it would delete it from the cloud. A fold retires a
- * copy's wire id that no row publishes, and the parse can move the original
- * onto it right after: a Claude Code record follows its message's last line.
- * Returns the number of ids dropped.
+ * Drops every wire id that a local row of this device is published under now
+ * from `target`'s retirement queue and from the list of deleted rows that the
+ * cloud target retracts as well (`DELETED_LOCAL_ROWS`). The row is pushed
+ * under that id, or left unsynced when the cloud did not store it; either way
+ * it is live, and a tombstone sent after it would delete it from the cloud,
+ * for good once the row counts as synced. A fold retires a copy's wire id
+ * that no row publishes, and the parse can move the original onto it right
+ * after: a Claude Code record follows its message's last line. A row can also
+ * come back under an id a parse deleted and queued, e.g. when an older CLI
+ * reads the source again under the id it always used. The check is made where
+ * the queue turns into deletions, so it holds however the row came back. The
+ * queue and the rows are read in one transaction, and the rows only when
+ * something is queued. Returns the number of queue entries dropped.
  */
 export function unretirePublishedWireIds(db: Database.Database, target: string, deviceInstanceId: string): number {
-  const retired = db.prepare('SELECT wire_id FROM sync_retired_wire_ids WHERE target = ?').all(target) as Array<{ wire_id: string }>
-  if (retired.length === 0) return 0
-  const published = new Set<string>()
+  const queued = db.prepare('SELECT DISTINCT wire_id FROM sync_retired_wire_ids WHERE target IN (?, ?)')
   const rows = db.prepare(`
     SELECT * FROM records
     WHERE ${LOCAL_RECORDS_WHERE} AND device_instance_id IN (?, '${UNKNOWN_DEVICE_INSTANCE_ID}')
-  `).all(deviceInstanceId) as Record<string, unknown>[]
-  for (const row of rows) published.add(publishedWireId(row, deviceInstanceId))
-  const drop = db.prepare('DELETE FROM sync_retired_wire_ids WHERE target = ? AND wire_id = ?')
+  `)
+  const drop = db.prepare('DELETE FROM sync_retired_wire_ids WHERE target IN (?, ?) AND wire_id = ?')
   return db.transaction(() => {
+    const retired = queued.all(target, DELETED_LOCAL_ROWS) as Array<{ wire_id: string }>
+    if (retired.length === 0) return 0
+    const published = new Set<string>()
+    for (const row of rows.all(deviceInstanceId) as Record<string, unknown>[]) {
+      published.add(publishedWireId(row, deviceInstanceId))
+    }
     let dropped = 0
     for (const { wire_id } of retired) {
-      if (published.has(wire_id)) dropped += drop.run(target, wire_id).changes
+      if (published.has(wire_id)) dropped += drop.run(target, DELETED_LOCAL_ROWS, wire_id).changes
     }
     return dropped
-  })()
+  }).immediate()
 }
 
 /**

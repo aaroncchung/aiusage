@@ -21,6 +21,7 @@ import {
 } from '../db/synced-records.js'
 import {
   clearRetiredWireIds,
+  DELETED_LOCAL_ROWS,
   getClaimedOwners,
   getRetiredWireIds,
   nextSyncTick,
@@ -343,33 +344,59 @@ export class CloudSyncOrchestrator {
 
   /**
    * The cloud store is upsert-only, so wire ids this device will never publish
-   * again (migration v14: Antigravity/Trae records re-keyed to their parser
-   * ids) are retracted with tombstones. An id is forgotten locally only once
-   * the server applied its tombstone, so an interrupted sync retries the rest,
-   * and one the server reports as rejected is kept and sent again. An id the
-   * cloud cannot hold (empty, or with a NUL, which PostgreSQL text cannot
-   * store) has no cloud record to retract: it is forgotten without being sent.
-   * An id a local row is published under again was just pushed for that row,
-   * so it is forgotten instead of retracted (`unretirePublishedWireIds`).
+   * again are retracted with tombstones: the ones queued for this target
+   * (migration v14: Antigravity/Trae records re-keyed to their parser ids; a
+   * parse that deleted rows this target had acknowledged) and the ones of
+   * every local row a parse deleted (`DELETED_LOCAL_ROWS`), which covers a
+   * row that was uploaded without an acknowledgement the delete could see.
+   * This runs after `push`, so an upload that read such a row before it was
+   * deleted has gone out before its tombstone.
+   *
+   * An id is forgotten locally, under both keys, only once the server applied
+   * its tombstone, so an interrupted sync retries the rest, and one the
+   * server reports as rejected is kept and sent again with the next sync. An
+   * id the cloud cannot hold (empty, or with a NUL, which PostgreSQL text
+   * cannot store) has no cloud record to retract: it is forgotten without
+   * being sent.
+   *
+   * Every batch is read from the queue as it is then, in the same transaction
+   * that first forgets, instead of retracting, every id a local row is
+   * published under (`unretirePublishedWireIds`): `push` has just uploaded
+   * that row, or a parse queued the id, wrote the row or stored it again
+   * while an earlier request was pending.
    */
   private async pushRetiredIds(syncGeneration: number): Promise<{ retiredCount: number; unretiredCount: number }> {
-    unretirePublishedWireIds(this.db, this.target, this.options.deviceInstanceId)
-    const retired = getRetiredWireIds(this.db, this.target)
     let retiredCount = 0
     let unretiredCount = 0
-    const now = Date.now()
     const storable = (id: string): boolean => id !== '' && !id.includes('\u0000')
-    for (let i = 0; i < retired.length; i += BATCH_SIZE) {
-      const batch = retired.slice(i, i + BATCH_SIZE)
-      clearRetiredWireIds(this.db, this.target, batch.filter(id => !storable(id)))
-      const sendable = batch.filter(storable)
-      if (sendable.length === 0) continue
-      const result = await cloudPush([], sendable.map(record_id => ({ record_id, updatedAt: now })), this.options.deviceInstanceId, syncGeneration)
+    // Each id is sent at most once per sync, so one the server rejected
+    // waits for the next sync instead of being read again here.
+    const sent = new Set<string>()
+    const unsent = (): string[] => {
+      const queued = Array.from(new Set([...getRetiredWireIds(this.db, this.target), ...getRetiredWireIds(this.db, DELETED_LOCAL_ROWS)]))
+      const unstorable = queued.filter(id => !storable(id))
+      clearRetiredWireIds(this.db, this.target, unstorable)
+      clearRetiredWireIds(this.db, DELETED_LOCAL_ROWS, unstorable)
+      return queued.filter(id => storable(id) && !sent.has(id))
+    }
+    // The live ids are checked and the batch is read in one transaction, so
+    // no parse can queue, publish or store an id in between. The local rows
+    // are read only when something is left to send.
+    const nextBatch = this.db.transaction((): string[] => {
+      if (unsent().length === 0) return []
+      unretirePublishedWireIds(this.db, this.target, this.options.deviceInstanceId)
+      return unsent().slice(0, BATCH_SIZE)
+    })
+    for (let batch = nextBatch.immediate(); batch.length > 0; batch = nextBatch.immediate()) {
+      for (const id of batch) sent.add(id)
+      const now = Date.now()
+      const result = await cloudPush([], batch.map(record_id => ({ record_id, updatedAt: now })), this.options.deviceInstanceId, syncGeneration)
       const rejected = new Set(result.rejectedTombstoneIds ?? [])
-      const applied = sendable.filter(id => !rejected.has(id))
+      const applied = batch.filter(id => !rejected.has(id))
       clearRetiredWireIds(this.db, this.target, applied)
+      clearRetiredWireIds(this.db, DELETED_LOCAL_ROWS, applied)
       retiredCount += applied.length
-      unretiredCount += sendable.length - applied.length
+      unretiredCount += batch.length - applied.length
     }
     return { retiredCount, unretiredCount }
   }

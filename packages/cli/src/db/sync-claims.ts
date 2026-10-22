@@ -162,6 +162,19 @@ export function releaseClaim(db: Database.Database, target: string, recordId: st
 }
 
 /**
+ * Not a sync target: the key under which `sync_retired_wire_ids` lists the
+ * wire id of every local row a parse deleted for good (see
+ * `deleteLocalRecords` in `commands/importer-duplicates.ts`). The delete
+ * queues the id for the targets that had acknowledged the row, but an
+ * acknowledgement can be missing for a row a target holds: the row sat in an
+ * upload that was read before the delete, or the response to its upload was
+ * lost. The cloud target therefore retracts every listed id as well; for an
+ * id it never received the tombstone changes nothing. An id a local row is
+ * published under again is dropped first (`unretirePublishedWireIds`).
+ */
+export const DELETED_LOCAL_ROWS = '*'
+
+/**
  * Wire ids this device published under `target` in the past and will never
  * publish again (see migration v14). File-based backends drop them implicitly
  * when the namespace snapshot is rewritten; the cloud backend needs explicit

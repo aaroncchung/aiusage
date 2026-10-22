@@ -9,6 +9,12 @@
 
 ### 修复
 - **Windows 上无法恢复损坏的数据库，恢复后的数据库也找不回历史数据**（[#147](https://github.com/juliantanx/aiusage/pull/147)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 缓存以 `SQLITE_CORRUPT` 或 `SQLITE_NOTADB` 打开失败时，文件会在仍被打开的状态下被删除，这在 Windows 上会失败；该错误被忽略，此后每条命令都会失败，直到用户手动删除文件。在所有平台上，`watermark.json` 中解析器的读取位置都会保留下来，因此新数据库会跳过所有已读过的日志。现在损坏的数据库会先被关闭，再连同其 `-wal`、`-shm` 和 `-journal` 文件一起改名为 `cache.db.corrupt-<时间>` 移到一旁，而不是被删除，因为其中可能有日志已不存在的用量数据。`watermark.json` 会被重置，下一次解析会重新导入所有日志。如果数据库无法移走（例如仍被另一个 aiusage 进程打开），会报告错误，所有文件保持原样。
+- **Kilo 与 OpenCode 的导入互相跳过对方的消息**（[#146](https://github.com/juliantanx/aiusage/pull/146)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — Kilo 数据库导入从 OpenCode 的游标开始读取，并把自己的位置写回该游标，因此同时存在 `kilo.db` 和 `opencode.db` 时，每次运行都会把共用的游标移过另一方尚未读取的消息。现在 Kilo 使用自己的游标，并会从头读取一次 `kilo.db`；升级后也会从头读取一次 `opencode.db`，以补回被跳过的消息。记录保持原有 id，已导入的行会原地更新。
+- **Cursor、Goose、Hermes、OpenCode 和 Kilo 在首次导入后增长的用量从未被统计**（[#146](https://github.com/juliantanx/aiusage/pull/146)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 这些导入在第一次看到某个会话、对话或消息时就把游标移过它，而它的 token 数仍在增长：Cursor 对话后来新增的气泡、Goose 会话之后累计的总量、导入时仍在进行的 Hermes 会话的最终用量，以及 OpenCode 或 Kilo 回复结束时才写入的 token 都会丢失。现在每次运行都会读取全部 Cursor 对话和 Goose 会话，Hermes 会话在结束前每次都会读取，尚未完成（或无法读取）的 OpenCode 和 Kilo 消息会按 id 保留并重复读取，直到完成。重新读取后未变化的行保持原样并维持已同步状态；`Parsed N records` 只统计新增或有变化的记录。Goose 会话即使之后创建时间变得可读或发生变化，也只保留一条记录。
+- **Trae 会话会因快照文件夹的顺序而被跳过**（[#146](https://github.com/juliantanx/aiusage/pull/146)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 导入在按名称顺序遍历快照文件夹时不断抬高跳过阈值，因此开始时间早于先前已遍历会话的会话永远不会被导入，首次运行也是如此。现在每次运行都会按开始时间顺序读取全部会话，会话的开始时间变化后也只保留一条记录。
+- **Kiro 的 token 日志每次变化都会被重复计入**（[#145](https://github.com/juliantanx/aiusage/pull/145)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 每次变化都会重新读取整个 `tokens_generated.jsonl`，并以新的 id 再次保存之前的每一行，时间戳也取自文件的修改时间。现在每一行只保存一次，id 由文件、行的位置和行内容生成；行内记录了时间时使用该时间；被替换的日志会从头重新读取。已保存的重复记录会在升级后清理一次，并从同步目标中撤回。
+- **Cursor 的 agent transcript 每次增长都会新增一条估算**（[#145](https://github.com/juliantanx/aiusage/pull/145)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 每次解析增长后的 agent transcript 都会在已有估算之外再新增一条，`state.vscdb` 已经统计过的对话也会被再估算一次。现在每个 transcript 只有一条估算，随文件增长而替换；对话一旦有来自 `state.vscdb` 的真实 token 数就不再估算。已保存的重复记录会在升级后清理一次，并从同步目标中撤回。
+- **CodeBuddy IDE 对话每新增一轮就会被重复计入**（[#145](https://github.com/juliantanx/aiusage/pull/145)，由 [@aaroncchung](https://github.com/aaroncchung) 贡献） — 每一轮都会再保存一条对话累计记录，之前的轮次因此被重复统计。现在每个对话只有一条记录，由最新的快照替换。已保存的多余记录会在升级后清理一次，保留的记录会作为最新版本发布到同步目标。
 
 ---
 

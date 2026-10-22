@@ -42,6 +42,14 @@ const CURRENT_CODEFUSE_PARSER_VERSION = 3
  */
 const CURRENT_CLAUDE_CODE_PARSER_VERSION = 2
 
+/**
+ * v1: the OpenCode cursor no longer moves past a message that is still being
+ * written, and Kilo no longer shares it (issues #82, #83). The cursor is reset
+ * once so messages either bug skipped are imported; records keep their ids,
+ * so rows that were already imported are updated in place.
+ */
+const CURRENT_OPENCODE_PARSER_VERSION = 1
+
 export interface WatermarkEntry {
   offset: number
   size: number
@@ -53,11 +61,28 @@ export interface WatermarkEntry {
 export interface HermesCursor {
   lastEndedAt: number  // Unix timestamp in seconds (float)
   lastId: string
+  /**
+   * Sessions that had no ended_at when they were last read, and sessions with
+   * a tool_calls payload that could not be read. They are read again on the
+   * next run whatever the cursor says, so the usage a session has when it
+   * ends, and the calls of a payload once it can be read, are not missed. A
+   * session whose payload stays unreadable stays in the list for as long as
+   * it exists. A cursor without the list was written before open sessions
+   * were tracked, and every session is read once more.
+   */
+  openSessionIds?: string[]
 }
 
 export interface OpenCodeCursor {
   lastMessageCreatedAt: number
   lastMessageId: string
+  /**
+   * Messages behind the cursor that are read again on the next run: assistant
+   * messages whose usage was not final when they were last read, rows that
+   * could not be read, and messages with a part that could not be read. The
+   * list is capped; see `MAX_PENDING_MESSAGES`.
+   */
+  pendingMessageIds?: string[]
 }
 
 export interface QoderCursor {
@@ -91,6 +116,7 @@ export interface WatermarkState {
   antigravityParserVersion?: number
   codefuseParserVersion?: number
   claudeCodeParserVersion?: number
+  importerDedupVersion?: number
   toolCallBackfillVersion?: number
   opencode?: OpenCodeCursor | null
   hermes?: HermesCursor | null
@@ -103,6 +129,10 @@ export interface WatermarkState {
   zcodeTools?: ZcodeToolCursor | null
   trae?: number | null
   codebuddyIde?: number | null
+
+  opencodeParserVersion?: number
+  /** Kilo's own cursor; kilo.db used to be read from `opencode`. */
+  kilo?: OpenCodeCursor | null
 }
 
 /** @deprecated Use FileWatermarkData instead */
@@ -116,6 +146,8 @@ function defaultState(): WatermarkState {
     antigravityParserVersion: CURRENT_ANTIGRAVITY_PARSER_VERSION,
     codefuseParserVersion: CURRENT_CODEFUSE_PARSER_VERSION,
     claudeCodeParserVersion: CURRENT_CLAUDE_CODE_PARSER_VERSION,
+
+    opencodeParserVersion: CURRENT_OPENCODE_PARSER_VERSION,
   }
 }
 
@@ -150,6 +182,17 @@ function defaultFileData(): FileWatermarkData {
   }
 }
 
+/**
+ * v1: Kiro token logs, Cursor agent transcripts and CodeBuddy IDE
+ * conversations were stored again under a new id each time their source
+ * changed (issues #79, #80, #81). Unlike the versions above, this one is not
+ * applied in `load()`: the repair deletes rows, so `runParse` runs it with the
+ * database at hand (`repairImporterDuplicates`) and records the version after.
+ * It is also absent from `defaultState()`, so a database whose
+ * `watermark.json` was lost is still repaired.
+ */
+export const CURRENT_IMPORTER_DEDUP_VERSION = 1
+
 export class WatermarkManager {
   private data: WatermarkState
   private path: string
@@ -178,6 +221,7 @@ export class WatermarkManager {
           antigravityParserVersion: parsed.antigravityParserVersion,
           codefuseParserVersion: parsed.codefuseParserVersion,
           claudeCodeParserVersion: parsed.claudeCodeParserVersion,
+          importerDedupVersion: parsed.importerDedupVersion,
           toolCallBackfillVersion: parsed.toolCallBackfillVersion,
           opencode: parsed.opencode ?? null,
           hermes: parsed.hermes ?? null,
@@ -190,6 +234,9 @@ export class WatermarkManager {
           zcodeTools: parsed.zcodeTools ?? null,
           trae: parsed.trae ?? null,
           codebuddyIde: parsed.codebuddyIde ?? null,
+
+          opencodeParserVersion: parsed.opencodeParserVersion,
+          kilo: parsed.kilo ?? null,
         }
       }
 
@@ -223,6 +270,14 @@ export class WatermarkManager {
         // Claude Code log so the missing calls are restored.
         state.files['claude-code'] = {}
         state.claudeCodeParserVersion = CURRENT_CLAUDE_CODE_PARSER_VERSION
+      }
+
+      if ((state.opencodeParserVersion ?? 0) < CURRENT_OPENCODE_PARSER_VERSION) {
+        // v1: the cursor moved past messages whose tokens were not written
+        // yet, and the Kilo import moved it past OpenCode messages it had
+        // never read; import opencode.db from the start once.
+        state.opencode = null
+        state.opencodeParserVersion = CURRENT_OPENCODE_PARSER_VERSION
       }
       return state
     } catch {
@@ -262,6 +317,15 @@ export class WatermarkManager {
 
   setOpenCodeCursor(cursor: OpenCodeCursor): void {
     this.data.opencode = cursor
+  }
+
+  /** Kilo's own cursor. It starts empty: kilo.db used to be read from OpenCode's. */
+  getKiloCursor(): OpenCodeCursor | null {
+    return this.data.kilo ?? null
+  }
+
+  setKiloCursor(cursor: OpenCodeCursor): void {
+    this.data.kilo = cursor
   }
 
   getHermesCursor(): HermesCursor | null {
@@ -350,5 +414,22 @@ export class WatermarkManager {
 
   setToolCallBackfillVersion(version: number): void {
     this.data.toolCallBackfillVersion = version
+  }
+
+  getImporterDedupVersion(): number {
+    return this.data.importerDedupVersion ?? 0
+  }
+
+  setImporterDedupVersion(version: number): void {
+    this.data.importerDedupVersion = version
+  }
+
+  /** Forget the entries of `tool` whose path satisfies `match`, so those files are read from the start again. */
+  removeEntries(tool: Tool, match: (filePath: string) => boolean): void {
+    const entries = this.data.files[tool]
+    if (!entries) return
+    for (const filePath of Object.keys(entries)) {
+      if (match(filePath)) delete entries[filePath]
+    }
   }
 }

@@ -217,7 +217,9 @@ export function runParseCodeBuddy(options: CodeBuddyImportOptions): CodeBuddyImp
       thinkingTokens: usage.thinkingTokens,
     }
     const cost = calculateCost(usage.model, tokenArgs, exchangeRate)
-    const recordId = recordIdFor(options, conversationDir, usage.ts)
+    // The conversation alone: the snapshot is cumulative, so a later turn
+    // replaces the conversation's record instead of adding one beside it.
+    const recordId = recordIdFor(options, conversationDir, 0)
 
     records.push({
       id: recordId,
