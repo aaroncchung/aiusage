@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Overview and Home showed totals from before the latest refresh** ([#151](https://github.com/juliantanx/aiusage/pull/151) by [@aaroncchung](https://github.com/aaroncchung)) — the dashboard kept summary responses in a cache and kept returning the stored copy; a newer copy fetched in the background only replaced the cache and was never shown. Overview, which parses new logs and then loads again, still showed the totals from before the refresh (and disagreed with Tokens, Cost and Models), and every Home poll and the first click on *refresh now* showed the previous result. Summary responses are no longer cached, so each load shows what the local server has at that moment. Overview's reload after the refresh keeps the figures on screen instead of flashing the loading state.
+- **Home was mounted twice on a cold load of `/` and left a polling loop running** ([#151](https://github.com/juliantanx/aiusage/pull/151) by [@aaroncchung](https://github.com/aaroncchung)) — the layout created the page again when the dashboard's auth check finished, and the first copy, still loading, then started its countdown and its `/api/home-summary` polling after it had already been torn down. Both kept running on every page until the tab was closed; the same happened when leaving Home while a poll was in flight. The public home and the full dashboard now share one page instance, so Home is mounted once (unlocking the dashboard from the home page still loads it again, with access to the settings and quotas it could not read while locked), and Home starts no timer or listener once it has been left.
+
 ---
 
 ## [1.5.25] - 2026-10-22
