@@ -116,6 +116,7 @@ export interface WatermarkState {
   antigravityParserVersion?: number
   codefuseParserVersion?: number
   claudeCodeParserVersion?: number
+  importerDedupVersion?: number
   toolCallBackfillVersion?: number
   opencode?: OpenCodeCursor | null
   hermes?: HermesCursor | null
@@ -181,6 +182,17 @@ function defaultFileData(): FileWatermarkData {
   }
 }
 
+/**
+ * v1: Kiro token logs, Cursor agent transcripts and CodeBuddy IDE
+ * conversations were stored again under a new id each time their source
+ * changed (issues #79, #80, #81). Unlike the versions above, this one is not
+ * applied in `load()`: the repair deletes rows, so `runParse` runs it with the
+ * database at hand (`repairImporterDuplicates`) and records the version after.
+ * It is also absent from `defaultState()`, so a database whose
+ * `watermark.json` was lost is still repaired.
+ */
+export const CURRENT_IMPORTER_DEDUP_VERSION = 1
+
 export class WatermarkManager {
   private data: WatermarkState
   private path: string
@@ -209,6 +221,7 @@ export class WatermarkManager {
           antigravityParserVersion: parsed.antigravityParserVersion,
           codefuseParserVersion: parsed.codefuseParserVersion,
           claudeCodeParserVersion: parsed.claudeCodeParserVersion,
+          importerDedupVersion: parsed.importerDedupVersion,
           toolCallBackfillVersion: parsed.toolCallBackfillVersion,
           opencode: parsed.opencode ?? null,
           hermes: parsed.hermes ?? null,
@@ -401,5 +414,22 @@ export class WatermarkManager {
 
   setToolCallBackfillVersion(version: number): void {
     this.data.toolCallBackfillVersion = version
+  }
+
+  getImporterDedupVersion(): number {
+    return this.data.importerDedupVersion ?? 0
+  }
+
+  setImporterDedupVersion(version: number): void {
+    this.data.importerDedupVersion = version
+  }
+
+  /** Forget the entries of `tool` whose path satisfies `match`, so those files are read from the start again. */
+  removeEntries(tool: Tool, match: (filePath: string) => boolean): void {
+    const entries = this.data.files[tool]
+    if (!entries) return
+    for (const filePath of Object.keys(entries)) {
+      if (match(filePath)) delete entries[filePath]
+    }
   }
 }
