@@ -38,13 +38,13 @@ export const load: PageServerLoad = async ({ locals }) => {
   // Load linked identities
   let identities: Array<{ provider: string; username: string | null; email: string | null; created_at: string }> = []
   try {
-    const rows = await sql`
+    const rows = await sql<typeof identities>`
       SELECT provider, provider_username AS username, email, created_at
       FROM user_identities
       WHERE user_id = ${locals.user.id}
       ORDER BY created_at ASC
     `
-    identities = rows as typeof identities
+    identities = rows
   } catch {}
 
   return { profile: base, usernameCooldownDays, identities, avatarMaxSize }

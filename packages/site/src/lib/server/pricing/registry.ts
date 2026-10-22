@@ -1,7 +1,9 @@
 import { calculateCostForPrice, resolvePriceFromTable, type PriceEntry } from '@aiusage/core'
+import type postgres from 'postgres'
 import { sql } from '$lib/server/db/pool.js'
 
-type SqlClient = typeof sql
+// The client or a transaction.
+type SqlClient = postgres.Sql | postgres.TransactionSql
 
 interface PriceRow {
   model_key: string

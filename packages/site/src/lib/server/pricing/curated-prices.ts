@@ -1,7 +1,8 @@
 import { CURATED_PRICES } from '@aiusage/core'
-import type { sql } from '../db/pool.js'
+import type postgres from 'postgres'
 
-type SqlClient = typeof sql
+// The client or a transaction.
+type SqlClient = postgres.Sql | postgres.TransactionSql
 
 /**
  * Seeds `CURATED_PRICES` (e.g. claude-opus-5-5, which prefix matching priced as

@@ -4,7 +4,7 @@ import { sql } from '$lib/server/db/pool.js'
 import { requireAdmin } from '$lib/server/auth/session.js'
 import { loadPricingRegistry } from '$lib/server/pricing/registry.js'
 import { invalidateLeaderboardCache } from '$lib/server/leaderboard/query.js'
-import { recomputeAggregateCost, recomputeToolModelCost, type CostMetricRow } from '$lib/server/leaderboard/recompute.js'
+import { recomputeAggregateCost, recomputeToolModelCost, type CostChildRow, type CostMetricRow } from '$lib/server/leaderboard/recompute.js'
 import { nanoid } from 'nanoid'
 
 /**
@@ -31,7 +31,7 @@ export const POST: RequestHandler = async (event) => {
   const pricing = await loadPricingRegistry(sql)
 
   // Query accepted leaderboard rows and recalculate costs from their token breakdown.
-  let query = sql`
+  let query = sql<CostMetricRow[]>`
     SELECT lm.id, lm.upload_request_id, lm.user_id, lm.device_id,
            lm.period_type, lm.period_start, lm.period_end, lm.scope_type, lm.tool, lm.model,
            lm.input_tokens, lm.output_tokens, lm.cache_read_tokens, lm.cache_write_tokens,
@@ -61,7 +61,7 @@ export const POST: RequestHandler = async (event) => {
   // visibility decides only whether a row is shown. Leaving hidden children
   // out made a parent's cost drop below what its tokens cost, and left a
   // hidden row with the old price for when it is restored.
-  const metrics = await query as CostMetricRow[]
+  const metrics = await query
 
   let recomputed = 0
   let skipped = 0
@@ -104,7 +104,7 @@ export const POST: RequestHandler = async (event) => {
 
   for (const row of aggregateRows) {
     const metric = row as CostMetricRow & { upload_request_id: string | null; user_id: string; period_type: string; period_start: string }
-    let children
+    let children: CostChildRow[]
     if (metric.scope_type === 'all') {
       // From the tool_model rows, as processUpload prices it: they are
       // recomputed above, whereas the model rows may come later in this loop.
@@ -135,7 +135,7 @@ export const POST: RequestHandler = async (event) => {
       `
     }
 
-    const update = recomputeAggregateCost(metric, children as Array<{ total_cost_usd: string | number; has_unknown_cost: boolean | null }>, pricing)
+    const update = recomputeAggregateCost(metric, children, pricing)
     if (!update) { skipped++; continue }
     if (update.unresolvedModel) unresolvedModels.add(update.unresolvedModel)
     if (update.preserved) preserved++
